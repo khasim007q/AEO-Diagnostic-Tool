@@ -10,7 +10,7 @@ The project consists of a decoupled, high-performance architecture:
 
 * **Backend (`/backend`)**: FastAPI application providing async endpoints, strict JSON schema validation, parallel model execution via OpenRouter, resilient retry logic, and independent Google SERP corroboration.
 * **Frontend (`/frontend`)**: React 18 + TypeScript + Vite application utilizing Tailwind CSS, Shadcn UI component design, TanStack Query for state management, Recharts for cross-engine benchmarks, and Zod for runtime network validation.
-* **LLM Engine Integration**: OpenRouter API invoking GPT-5-mini, Claude Sonnet 4, and Gemini 2.5 Flash with strict structured JSON schema.
+* **LLM Engine Integration**: OpenRouter API invoking GPT-5-mini (with native OpenRouter `json_schema` response formatting), plus Claude Sonnet 4 and Gemini 2.5 Flash (with structured schema prompt instructions and resilient parser validation).
 * **Search Corroboration**: SerpApi executing organic Google queries localized to targeted markets and domains.
 
 ---
@@ -40,7 +40,7 @@ $$\text{AI Visibility Score} = 100 \times \frac{\sum_{i=1}^S \text{position\_sco
 
 * No consensus multipliers are applied.
 * No Google search bonus is added to the AI score.
-* The score is guaranteed to remain strictly between 0 and 100.
+* The score is guaranteed to remain bounded from 0 to 100 inclusive.
 * If an engine fails (e.g., timeout, rate limit exhausted), it is excluded from the denominator $S$ so the brand score is not unfairly penalized, but the failure is reported in engine availability telemetry.
 
 ---

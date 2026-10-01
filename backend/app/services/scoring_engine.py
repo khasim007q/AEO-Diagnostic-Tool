@@ -313,13 +313,21 @@ def calculate_gap_analysis(
         })
 
         # Per-engine breakdown
+        # Only evaluate engines where both target brand and competitor had successful runs
+        # Prevents comparing a real recommendation against a failed/invalid/partial engine
         for eng in engine_names:
             target_obs = target_brand.observations.get(eng)
             comp_obs = comp.observations.get(eng)
 
+            if not target_obs or not comp_obs:
+                continue
+
+            if target_obs.status != "success" or comp_obs.status != "success":
+                continue
+
             # Score in this engine out of 100
-            target_pos = round((target_obs.position_score * 100.0), 1) if target_obs else 0.0
-            comp_pos = round((comp_obs.position_score * 100.0), 1) if comp_obs else 0.0
+            target_pos = round((target_obs.position_score * 100.0), 1)
+            comp_pos = round((comp_obs.position_score * 100.0), 1)
 
             eng_gap = round(target_pos - comp_pos, 1)
             if eng_gap > 0:

@@ -12,6 +12,8 @@ from app.utils.entity_resolution import (
     normalize_brand_name,
     normalize_text_for_search,
     is_domain_match,
+    get_brand_search_variants,
+    is_variant_in_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,7 +63,7 @@ def _evaluate_single_result(
 ) -> GoogleCorroborationResult:
     """Independently evaluate a single organic search result without concatenating text.
 
-    Applies strict domain matching and symmetric text normalization for titles and snippets.
+    Applies strict domain matching, alias-aware search terms, and symmetric text normalization.
     """
     rank = res.get("position", idx + 1)
     title = res.get("title") or ""
@@ -70,26 +72,30 @@ def _evaluate_single_result(
     domain = extract_domain(url) or ""
 
     clean_target_domain = extract_domain(target_domain) if target_domain else None
-    norm_target_search = normalize_text_for_search(target_brand) if target_brand else ""
+    search_variants = get_brand_search_variants(target_brand) if target_brand else []
 
     # 1. Strict domain match check (hostname or legitimate subdomain)
     domain_match = False
     if clean_target_domain and domain:
         domain_match = is_domain_match(clean_target_domain, domain)
 
-    # 2. Title word match with symmetric normalization
+    # 2. Title word match with alias awareness and symmetric normalization
     title_match = False
-    if norm_target_search and title:
+    if search_variants and title:
         norm_title = normalize_text_for_search(title)
-        if re.search(r'\b' + re.escape(norm_target_search) + r'\b', norm_title):
-            title_match = True
+        for variant in search_variants:
+            if is_variant_in_text(variant, title, norm_title):
+                title_match = True
+                break
 
-    # 3. Snippet word match with symmetric normalization
+    # 3. Snippet word match with alias awareness and symmetric normalization
     snippet_match = False
-    if norm_target_search and snippet:
+    if search_variants and snippet:
         norm_snippet = normalize_text_for_search(snippet)
-        if re.search(r'\b' + re.escape(norm_target_search) + r'\b', norm_snippet):
-            snippet_match = True
+        for variant in search_variants:
+            if is_variant_in_text(variant, snippet, norm_snippet):
+                snippet_match = True
+                break
 
     normalized_brand_match = title_match or snippet_match
 

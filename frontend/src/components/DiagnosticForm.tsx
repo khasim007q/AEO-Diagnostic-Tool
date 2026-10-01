@@ -119,6 +119,7 @@ export default function DiagnosticForm({
               type="text"
               required
               disabled={isLoading}
+              maxLength={300}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="e.g. best running shoes for marathon training"

@@ -219,15 +219,30 @@ export default function BrandTable({
                                       </td>
                                       <td className="py-2.5 text-muted-foreground">
                                         <div className="flex flex-wrap gap-1.5 items-center">
-                                          {Object.entries(prod.engineRanks).map(([eng, rank]) => (
-                                            <span
-                                              key={eng}
-                                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-muted/80 text-foreground text-[11px] font-medium border border-border/50"
-                                            >
-                                              <span className="text-muted-foreground">{eng}:</span>
-                                              <span className="font-semibold text-primary">#{rank}</span>
-                                            </span>
-                                          ))}
+                                          {Object.entries(prod.engineRanks).map(([eng, rank]) => {
+                                            const engObs = brand.observations[eng];
+                                            const isPartial = engObs?.status === "partial";
+                                            return (
+                                              <span
+                                                key={eng}
+                                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border ${
+                                                  isPartial
+                                                    ? "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30"
+                                                    : "bg-muted/80 text-foreground border-border/50"
+                                                }`}
+                                              >
+                                                <span className={isPartial ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}>{eng}:</span>
+                                                <span className={isPartial ? "font-semibold text-amber-600 dark:text-amber-400" : "font-semibold text-primary"}>
+                                                  #{rank}
+                                                </span>
+                                                {isPartial && (
+                                                  <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                                                    [partial]
+                                                  </span>
+                                                )}
+                                              </span>
+                                            );
+                                          })}
                                         </div>
                                       </td>
                                       <td className="py-2.5 text-right font-semibold text-foreground">

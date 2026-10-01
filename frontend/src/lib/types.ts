@@ -2,7 +2,7 @@
 import { z } from "zod";
 
 export const DiagnosticRequestSchema = z.object({
-  query: z.string().min(3).max(500),
+  query: z.string().min(3).max(300),
   your_brand: z.string().max(100).optional(),
   website_or_domain: z.string().max(200).optional(),
   market: z.string().default("US"),

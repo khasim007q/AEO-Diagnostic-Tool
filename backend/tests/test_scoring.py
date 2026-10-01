@@ -213,6 +213,44 @@ class TestGapAnalysisSigned:
         assert leader_gap["gap"] == -20.0
         assert leader_gap["status"] == "losing"
 
+    def test_gap_analysis_omits_failed_or_partial_engines(self):
+        """When an engine failed or produced partial output for either brand, omit that engine's gap."""
+        recs_gpt = [
+            ParsedRecommendation(rank=1, brand="Nike", product="Nike Pegasus"),
+        ]
+        results = {
+            "GPT": EngineExecutionResult(
+                engine="GPT",
+                status="success",
+                parse_result=ParseResult(status="valid", recommendations=recs_gpt),
+            ),
+            "Claude": EngineExecutionResult(
+                engine="Claude",
+                status="failed",
+                error_type="timeout",
+                error_message="Claude timed out",
+            ),
+            "Gemini": EngineExecutionResult(
+                engine="Gemini",
+                status="partial",
+                parse_result=ParseResult(
+                    status="partial",
+                    recommendations=[ParsedRecommendation(rank=2, brand="Adidas", product="Adidas Sambas")],
+                ),
+            ),
+        }
+        all_brands, target, comps = aggregate_brands(results, target_brand_name="Nike")
+        gaps = calculate_gap_analysis(target, comps, ["GPT", "Claude", "Gemini"])
+
+        # Check all gap entries generated
+        engine_gap_engines = [g["engine"] for g in gaps]
+        # Overall gap should exist
+        assert "Overall" in engine_gap_engines
+        # Claude (failed) must not be compared
+        assert "Claude" not in engine_gap_engines
+        # Gemini (partial) must not be compared
+        assert "Gemini" not in engine_gap_engines
+
 
 class TestTypedInsights:
     """Verify evidence-based typed insights generation."""

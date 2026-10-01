@@ -3,7 +3,7 @@ import time
 import logging
 import asyncio
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Request
 
@@ -74,12 +74,49 @@ def _check_rate_limit(client_ip: str) -> None:
     _ip_request_timestamps[client_ip].append(now)
 
 
+# Global daily spend protection tracker: tracks requests and LLM calls per UTC day
+_daily_budget_tracker: Dict[str, Any] = {
+    "date": "",
+    "requests": 0,
+    "llm_calls": 0,
+}
+
+
+def _check_global_budget(num_engines: int = len(MODELS)) -> None:
+    """Enforce daily global limits on total requests and LLM calls to prevent runaway API spend."""
+    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Reset counter if day has changed
+    if _daily_budget_tracker["date"] != current_date:
+        _daily_budget_tracker["date"] = current_date
+        _daily_budget_tracker["requests"] = 0
+        _daily_budget_tracker["llm_calls"] = 0
+
+    if _daily_budget_tracker["requests"] >= settings.DAILY_REQUEST_BUDGET:
+        logger.warning("Global daily request budget reached: %d", _daily_budget_tracker["requests"])
+        raise HTTPException(
+            status_code=429,
+            detail="Global daily diagnostic request budget reached. Please try again tomorrow.",
+        )
+
+    if _daily_budget_tracker["llm_calls"] + num_engines > settings.DAILY_LLM_CALL_BUDGET:
+        logger.warning("Global daily LLM call budget reached: %d", _daily_budget_tracker["llm_calls"])
+        raise HTTPException(
+            status_code=429,
+            detail="Global daily LLM call budget reached. Please try again tomorrow.",
+        )
+
+    _daily_budget_tracker["requests"] += 1
+    _daily_budget_tracker["llm_calls"] += num_engines
+
+
 @api_router.post("/diagnostic", response_model=DiagnosticResponse)
 async def run_diagnostic(request: DiagnosticRequest, req: Request):
     """Run an AI Visibility Diagnostic with parallel model execution and search corroboration."""
-    # 1. API Protection: Rate limiting
+    # 1. API Protection: Rate limiting and global spend protection
     client_ip = req.client.host if req.client else "unknown"
     _check_rate_limit(client_ip)
+    _check_global_budget(len(MODELS))
 
     # 2. Concurrency limiting and time budgeting
     deadline = time.monotonic() + settings.DIAGNOSTIC_TIMEOUT_SECONDS

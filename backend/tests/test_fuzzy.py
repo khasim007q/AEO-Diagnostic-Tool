@@ -18,6 +18,8 @@ from app.utils.entity_resolution import (
     extract_domain,
     is_domain_match,
     resolve_brand_entity,
+    get_brand_search_variants,
+    is_variant_in_text,
 )
 
 
@@ -40,12 +42,18 @@ class TestNormalizeBrandName:
         assert normalize_brand_name("Pro/Trainer") == "pro trainer"
 
     def test_collapses_whitespace(self):
-        assert normalize_brand_name("  Sony   Electronics  ") == "sony"
+        assert normalize_brand_name("  New   Balance  ") == "new balance"
 
     def test_resolves_known_alias(self):
         assert normalize_brand_name("ON") == "optimum nutrition"
         assert normalize_brand_name("Optimum") == "optimum nutrition"
         assert normalize_brand_name("MSFT") == "microsoft"
+
+    def test_conservative_aliases_not_merging_divisions(self):
+        # Divisions, subsidiaries, and legal entities must not merge to base brands
+        assert normalize_brand_name("Sony Electronics") == "sony electronics"
+        assert normalize_brand_name("Apple Computer") == "apple computer"
+        assert normalize_brand_name("Nike Athletic") == "nike athletic"
 
     def test_does_not_merge_corporate_parents_and_subsidiaries(self):
         # AWS != Amazon, Facebook != Meta, Alphabet != Google
@@ -228,3 +236,46 @@ class TestFuzzyFindInText:
         assert fuzzy_find_in_text("", "text") is False
         assert fuzzy_find_in_text("Nike", "") is False
         assert fuzzy_find_in_text(None, "text") is False
+
+
+class TestBrandSearchVariantsAndCorroborationMatching:
+    """Tests for alias-aware search variants and preposition-safe text matching."""
+
+    def test_search_variants_for_alias(self):
+        # Target "ON" should include "optimum nutrition" and "on"
+        variants = get_brand_search_variants("ON")
+        assert "optimum nutrition" in variants
+        assert "on" in variants
+        # Sorted by length descending
+        assert variants[0] == "optimum nutrition"
+
+    def test_search_variants_for_canonical(self):
+        # Target "Optimum Nutrition" should include "optimum nutrition", "on", "optimum"
+        variants = get_brand_search_variants("Optimum Nutrition")
+        assert "optimum nutrition" in variants
+        assert "on" in variants
+        assert "optimum" in variants
+
+    def test_is_variant_in_text_acronym_matches_in_full_title(self):
+        # Title mentioning Optimum Nutrition Gold Standard matches search variants for "ON"
+        variants = get_brand_search_variants("ON")
+        raw_title = "Optimum Nutrition Gold Standard 100% Whey"
+        norm_title = normalize_text_for_search(raw_title)
+
+        matched = any(is_variant_in_text(v, raw_title, norm_title) for v in variants)
+        assert matched is True
+
+    def test_is_variant_in_text_ignores_english_preposition_on(self):
+        # Text with lowercase preposition "on" should NOT match target acronym "ON"
+        raw_text = "Running shoes for best performance on roads and trails."
+        norm_text = normalize_text_for_search(raw_text)
+
+        # "on" is length <= 2, raw_text has lowercase "on", NOT uppercase "ON"
+        assert is_variant_in_text("on", raw_text, norm_text) is False
+
+    def test_is_variant_in_text_matches_uppercase_acronym_on(self):
+        # Raw text with uppercase ON should match
+        raw_text = "Top picks from ON Running and Nike."
+        norm_text = normalize_text_for_search(raw_text)
+
+        assert is_variant_in_text("on", raw_text, norm_text) is True

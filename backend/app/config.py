@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     MAX_RATE_LIMIT_ENTRIES: int = 5000
     CONCURRENCY_LIMIT: int = 5
     DIAGNOSTIC_TIMEOUT_SECONDS: float = 35.0
+    DAILY_REQUEST_BUDGET: int = 200
+    DAILY_LLM_CALL_BUDGET: int = 600
 
     model_config = SettingsConfigDict(
         env_file=".env",

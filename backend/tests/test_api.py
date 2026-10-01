@@ -52,6 +52,10 @@ class TestDiagnosticValidation:
         response = client.post("/api/v1/diagnostic", json={})
         assert response.status_code == 422
 
+    def test_query_exceeds_300_chars_returns_422(self):
+        response = client.post("/api/v1/diagnostic", json={"query": "a" * 301})
+        assert response.status_code == 422
+
     def test_brand_too_long_returns_422(self):
         response = client.post(
             "/api/v1/diagnostic",
@@ -256,3 +260,47 @@ class TestDiagnosticExecution:
         assert metrics["configured_engine_count"] == 2
         assert metrics["engine_availability"] == 50.0
         assert metrics["engine_availability_display"] == "1/2 engines"
+
+
+class TestSpendProtectionBudget:
+    """Tests for daily global spend budget limits."""
+
+    def test_daily_request_budget_exceeded(self):
+        from app.api import router
+        old_budget = router.settings.DAILY_REQUEST_BUDGET
+        old_tracker = router._daily_budget_tracker.copy()
+        try:
+            router.settings.DAILY_REQUEST_BUDGET = 2
+            router._daily_budget_tracker = {
+                "date": "2026-10-01",
+                "requests": 2,
+                "llm_calls": 6,
+            }
+            with patch("app.api.router.datetime") as mock_dt:
+                mock_dt.now.return_value.strftime.return_value = "2026-10-01"
+                response = client.post("/api/v1/diagnostic", json={"query": "test query"})
+                assert response.status_code == 429
+                assert "Global daily diagnostic request budget reached" in response.json()["detail"]
+        finally:
+            router.settings.DAILY_REQUEST_BUDGET = old_budget
+            router._daily_budget_tracker = old_tracker
+
+    def test_daily_llm_budget_exceeded(self):
+        from app.api import router
+        old_budget = router.settings.DAILY_LLM_CALL_BUDGET
+        old_tracker = router._daily_budget_tracker.copy()
+        try:
+            router.settings.DAILY_LLM_CALL_BUDGET = 5
+            router._daily_budget_tracker = {
+                "date": "2026-10-01",
+                "requests": 1,
+                "llm_calls": 4,
+            }
+            with patch("app.api.router.datetime") as mock_dt:
+                mock_dt.now.return_value.strftime.return_value = "2026-10-01"
+                response = client.post("/api/v1/diagnostic", json={"query": "test query"})
+                assert response.status_code == 429
+                assert "Global daily LLM call budget reached" in response.json()["detail"]
+        finally:
+            router.settings.DAILY_LLM_CALL_BUDGET = old_budget
+            router._daily_budget_tracker = old_tracker

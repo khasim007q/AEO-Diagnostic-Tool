@@ -1,7 +1,7 @@
 # entity_resolution.py
 import re
 import unicodedata
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple, Dict, Set
 from thefuzz import fuzz
 
 # Common legal and corporate entity suffixes to normalize away only when trailing
@@ -11,22 +11,12 @@ TRAILING_LEGAL_SUFFIX_PATTERN = (
 TRAILING_CO_PATTERN = r'(?:,\s*|\s+)(?:co|company)\.?$'
 
 # Explicit canonical brand aliases
-# CRITICAL: Do NOT merge corporate parents, subsidiaries, and separate business units.
-# Separate: AWS != Amazon, Facebook != Meta, Alphabet != Google.
-# Only safe brand abbreviations and exact identity variants belong here.
+# Conservative list: only defensible identical consumer-facing brand identities (acronyms / abbreviations)
+# Excludes legal entities, divisions, and historical names (e.g. Sony Electronics, Apple Computer, Nike Athletic).
 KNOWN_ALIASES: Dict[str, str] = {
     "on": "optimum nutrition",
     "optimum": "optimum nutrition",
-    "apple computer": "apple",
-    "sony electronics": "sony",
-    "nike athletic": "nike",
-    "microsoft corp": "microsoft",
     "msft": "microsoft",
-    "nature made vitamins": "nature made",
-    "dymatize nutrition": "dymatize",
-    "myprotein uk": "myprotein",
-    "bsn supplements": "bsn",
-    "muscletech research": "muscletech",
 }
 
 
@@ -95,6 +85,59 @@ def normalize_text_for_search(text: str) -> str:
     lowered = re.sub(r"['’‘`ʻ]", " ", lowered)
     lowered = re.sub(r'[^a-z0-9\s]', ' ', lowered)
     return re.sub(r'\s+', ' ', lowered).strip()
+
+
+def get_brand_search_variants(brand_name: Optional[str]) -> List[str]:
+    """Return all search term variants for a brand, including its canonical form and safe aliases.
+
+    Variants are sorted from longest to shortest so that specific multi-word phrases
+    are evaluated with priority.
+    """
+    if not brand_name:
+        return []
+
+    variants: Set[str] = set()
+
+    # 1. Direct search normalization of the raw brand input
+    raw_norm = normalize_text_for_search(brand_name)
+    if raw_norm:
+        variants.add(raw_norm)
+
+    # 2. Canonical normalized brand name
+    canon_norm = normalize_brand_name(brand_name)
+    if canon_norm:
+        variants.add(canon_norm)
+
+    # 3. Known safe aliases in both directions
+    # If the brand is an alias (e.g. "on" -> "optimum nutrition"), add the canonical target
+    if canon_norm in KNOWN_ALIASES:
+        canonical_target = KNOWN_ALIASES[canon_norm]
+        variants.add(normalize_text_for_search(canonical_target))
+
+    # If the brand is the canonical target (e.g. "optimum nutrition"), add any aliases that map to it
+    for alias_key, canon_val in KNOWN_ALIASES.items():
+        if canon_norm == canon_val:
+            variants.add(normalize_text_for_search(alias_key))
+
+    return sorted(list(variants), key=lambda v: len(v), reverse=True)
+
+
+def is_variant_in_text(variant: str, raw_text: str, norm_text: str) -> bool:
+    """Evaluate whether a search variant is present in a block of text.
+
+    For substantive terms (length > 2), word boundary matching on normalized text is used.
+    For short acronyms (length <= 2, e.g. 'ON'), uppercase word boundary matching in raw
+    text is enforced to avoid false positives on English prepositions ('on').
+    """
+    if not variant or not raw_text or not norm_text:
+        return False
+
+    if len(variant) > 2:
+        return bool(re.search(r'\b' + re.escape(variant) + r'\b', norm_text))
+
+    # For short 1-2 character variants, require case-sensitive uppercase whole-word match
+    target_caps = variant.upper()
+    return bool(re.search(r'\b' + re.escape(target_caps) + r'\b', raw_text))
 
 
 def extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
