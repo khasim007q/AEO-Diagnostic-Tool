@@ -145,6 +145,6 @@ describe("BrandTable Component", () => {
 
     expect(screen.getByText("Product Evidence for Nike")).toBeInTheDocument();
     expect(screen.getByText("Nike Vaporfly 3")).toBeInTheDocument();
-    expect(screen.getByText("#4")).toBeInTheDocument();
+    expect(screen.getAllByText("#4").length).toBeGreaterThan(0);
   });
 });

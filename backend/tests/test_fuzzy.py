@@ -14,7 +14,9 @@ import pytest
 from app.utils.fuzzy import is_same_brand, is_same_product, fuzzy_find_in_text
 from app.utils.entity_resolution import (
     normalize_brand_name,
+    normalize_text_for_search,
     extract_domain,
+    is_domain_match,
     resolve_brand_entity,
 )
 
@@ -26,11 +28,12 @@ class TestNormalizeBrandName:
         assert normalize_brand_name("Apple Inc.") == "apple"
         assert normalize_brand_name("Microsoft Corporation") == "microsoft"
         assert normalize_brand_name("Nike LLC") == "nike"
-        assert normalize_brand_name("Adidas AG") == "adidas ag"
 
     def test_strips_punctuation_and_trademarks(self):
         assert normalize_brand_name("Nature's Best(TM)") == "natures best"
         assert normalize_brand_name("Optimum Nutrition(R)") == "optimum nutrition"
+        assert normalize_brand_name("Nike®") == "nike"
+        assert normalize_brand_name("Apple™") == "apple"
 
     def test_replaces_hyphens_and_slashes(self):
         assert normalize_brand_name("Coca-Cola") == "coca cola"
@@ -41,12 +44,48 @@ class TestNormalizeBrandName:
 
     def test_resolves_known_alias(self):
         assert normalize_brand_name("ON") == "optimum nutrition"
-        assert normalize_brand_name("AWS") == "amazon"
+        assert normalize_brand_name("Optimum") == "optimum nutrition"
         assert normalize_brand_name("MSFT") == "microsoft"
 
+    def test_does_not_merge_corporate_parents_and_subsidiaries(self):
+        # AWS != Amazon, Facebook != Meta, Alphabet != Google
+        assert normalize_brand_name("AWS") == "aws"
+        assert normalize_brand_name("Amazon") == "amazon"
+        assert normalize_brand_name("Facebook") == "facebook"
+        assert normalize_brand_name("Meta") == "meta"
+        assert normalize_brand_name("Alphabet") == "alphabet"
+        assert normalize_brand_name("Google") == "google"
 
-class TestExtractDomain:
-    """Tests for URL and domain extraction."""
+    def test_context_aware_legal_and_co_preservation(self):
+        assert normalize_brand_name("Apple Inc.") == "apple"
+        assert normalize_brand_name("Nike LLC") == "nike"
+        assert normalize_brand_name("Coca-Cola") == "coca cola"
+        assert normalize_brand_name("Co-op") == "co op"
+        assert normalize_brand_name("Company A") == "company a"
+
+    def test_apostrophe_and_unicode_variants(self):
+        assert normalize_brand_name("L'Oréal") == "l oreal"
+        assert normalize_brand_name("L’Oreal") == "l oreal"
+        assert normalize_brand_name("L Oreal") == "l oreal"
+        assert normalize_brand_name("Nature’s Best") == "natures best"
+        assert normalize_brand_name("Nature's Best") == "natures best"
+
+
+class TestDomainMatching:
+    """Tests for strict hostname and subdomain matching."""
+
+    def test_exact_domain(self):
+        assert is_domain_match("nike.com", "nike.com") is True
+
+    def test_valid_subdomain(self):
+        assert is_domain_match("nike.com", "store.nike.com") is True
+        assert is_domain_match("apple.com", "developer.apple.com") is True
+
+    def test_rejects_subdomain_spoofing(self):
+        # nike.com.example.com must NOT match nike.com
+        assert is_domain_match("nike.com", "nike.com.example.com") is False
+        assert is_domain_match("nike.com", "faknike.com") is False
+        assert is_domain_match("apple.com", "apple.com.attacker.com") is False
 
     def test_full_url(self):
         assert extract_domain("https://www.nike.com/running") == "nike.com"

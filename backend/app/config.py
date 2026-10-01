@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     SERPAPI_KEY: str = ""
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     DEBUG: bool = False
+    RATE_LIMIT_WINDOW_SECONDS: int = 60
+    RATE_LIMIT_MAX_REQUESTS: int = 15
+    MAX_RATE_LIMIT_ENTRIES: int = 5000
+    CONCURRENCY_LIMIT: int = 5
+    DIAGNOSTIC_TIMEOUT_SECONDS: float = 35.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

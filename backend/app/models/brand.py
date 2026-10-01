@@ -17,7 +17,7 @@ class ProductEvidence:
 class EngineObservation:
     """Scoring observation for a brand within a specific engine run."""
     engine: str
-    status: str  # "success" | "failed" | "invalid"
+    status: str  # "success" | "partial" | "invalid" | "failed"
     mentioned: bool = False
     best_rank: Optional[int] = None
     position_score: float = 0.0  # 1.00, 0.80, 0.60, 0.40, 0.20, 0.00

@@ -6,6 +6,7 @@ from thefuzz import fuzz
 
 from app.utils.entity_resolution import (
     normalize_brand_name,
+    normalize_text_for_search,
     resolve_brand_entity,
     extract_domain,
     KNOWN_ALIASES,
@@ -78,7 +79,8 @@ def is_same_product(p1: Optional[str], p2: Optional[str], threshold: int = 80) -
 def fuzzy_find_in_text(brand_name: Optional[str], text: Optional[str], threshold: int = 85) -> bool:
     """Check if a brand name appears anywhere in a block of text.
 
-    Evaluated independently on single text snippets (not concatenated blobs).
+    Evaluated independently on single text snippets (not concatenated blobs)
+    with symmetric punctuation, apostrophe, and diacritic normalization.
     """
     if not brand_name or not text:
         return False
@@ -87,11 +89,13 @@ def fuzzy_find_in_text(brand_name: Optional[str], text: Optional[str], threshold
     if not norm_brand:
         return False
 
-    text_lower = text.lower()
+    norm_text = normalize_text_for_search(text)
+    if not norm_text:
+        return False
 
-    # Word boundary regex search for the brand (prevents 'Son' from matching 'Sony')
+    # Word boundary regex search on symmetrically normalized text
     escaped_brand = re.escape(norm_brand)
-    if re.search(r'\b' + escaped_brand + r'\b', text_lower):
+    if re.search(r'\b' + escaped_brand + r'\b', norm_text):
         return True
 
     # For very short brands (< 4 chars), exact word-boundary regex match above is sufficient
@@ -100,7 +104,7 @@ def fuzzy_find_in_text(brand_name: Optional[str], text: Optional[str], threshold
         return False
 
     brand_tokens = norm_brand.split()
-    text_tokens = re.sub(r'[^a-z0-9\s]', ' ', text_lower).split()
+    text_tokens = norm_text.split()
     window_size = len(brand_tokens)
 
     if window_size == 0 or len(text_tokens) < window_size:

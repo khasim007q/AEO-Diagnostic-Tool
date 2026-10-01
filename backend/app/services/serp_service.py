@@ -7,7 +7,12 @@ from typing import List, Dict, Any, Optional
 
 from serpapi import GoogleSearch
 from app.config import settings
-from app.utils.entity_resolution import extract_domain, normalize_brand_name
+from app.utils.entity_resolution import (
+    extract_domain,
+    normalize_brand_name,
+    normalize_text_for_search,
+    is_domain_match,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,34 +59,36 @@ def _evaluate_single_result(
     target_brand: Optional[str],
     target_domain: Optional[str],
 ) -> GoogleCorroborationResult:
-    """Independently evaluate a single organic search result without concatenating text."""
+    """Independently evaluate a single organic search result without concatenating text.
+
+    Applies strict domain matching and symmetric text normalization for titles and snippets.
+    """
     rank = res.get("position", idx + 1)
     title = res.get("title") or ""
     snippet = res.get("snippet") or ""
     url = res.get("link") or ""
     domain = extract_domain(url) or ""
 
-    norm_target = normalize_brand_name(target_brand) if target_brand else ""
     clean_target_domain = extract_domain(target_domain) if target_domain else None
+    norm_target_search = normalize_text_for_search(target_brand) if target_brand else ""
 
-    # 1. Domain match check (highest confidence)
+    # 1. Strict domain match check (hostname or legitimate subdomain)
     domain_match = False
     if clean_target_domain and domain:
-        if clean_target_domain == domain or clean_target_domain in domain or domain in clean_target_domain:
-            domain_match = True
+        domain_match = is_domain_match(clean_target_domain, domain)
 
-    # 2. Title word match check
+    # 2. Title word match with symmetric normalization
     title_match = False
-    if norm_target and title:
-        norm_title = title.lower()
-        if re.search(r'\b' + re.escape(norm_target) + r'\b', norm_title):
+    if norm_target_search and title:
+        norm_title = normalize_text_for_search(title)
+        if re.search(r'\b' + re.escape(norm_target_search) + r'\b', norm_title):
             title_match = True
 
-    # 3. Snippet word match check
+    # 3. Snippet word match with symmetric normalization
     snippet_match = False
-    if norm_target and snippet:
-        norm_snippet = snippet.lower()
-        if re.search(r'\b' + re.escape(norm_target) + r'\b', norm_snippet):
+    if norm_target_search and snippet:
+        norm_snippet = normalize_text_for_search(snippet)
+        if re.search(r'\b' + re.escape(norm_target_search) + r'\b', norm_snippet):
             snippet_match = True
 
     normalized_brand_match = title_match or snippet_match

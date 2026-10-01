@@ -49,15 +49,20 @@ def aggregate_brands(
 ) -> Tuple[List[Brand], Optional[Brand], List[Brand]]:
     """Aggregate engine results into Brand ranking entities with deterministic AI Visibility Scores.
 
+    Two-pass implementation:
+    - Pass 1: Discovers all unique brand entities across all engines.
+    - Pass 2: Guarantees every discovered brand receives an explicit EngineObservation
+      for every configured engine in engine_results.
+
     Rules:
-    - Exactly one scoring observation per brand per successful engine run.
+    - Exactly one scoring observation per brand per configured engine.
     - If multiple products for the same brand appear in an engine, only the BEST rank is scored.
     - All products remain preserved as supporting evidence.
-    - AI Visibility Score = 100 * mean(position_score) across SUCCESSFUL engines.
-    - Failed or invalid engines do not penalize the score denominator.
+    - Only SUCCESSFUL engine runs participate in the AI Visibility Score denominator.
+    - Partial, invalid, and failed runs do not penalize the score denominator.
     - No consensus multiplier.
     - No Google search bonus.
-    - Guaranteed 0 to 100.
+    - Score is strictly guaranteed 0 to 100.
 
     Returns:
         (all_brands, target_brand, competitors)
@@ -74,6 +79,11 @@ def aggregate_brands(
     # Cache of known brands for entity resolution: list of (canonical_name, normalized_name, domain)
     known_entities: List[Tuple[str, str, Optional[str]]] = []
 
+    # Map of engine_name -> normalized_brand_key -> list of ProductEvidence
+    engine_evidence: Dict[str, Dict[str, List[ProductEvidence]]] = {
+        eng: {} for eng in engine_results
+    }
+
     # If target brand provided, register it first so variations resolve to target
     clean_target_name = target_brand_name.strip() if target_brand_name else None
     if clean_target_name:
@@ -87,14 +97,9 @@ def aggregate_brands(
         brand_map[norm_target] = target_b
         known_entities.append((clean_target_name, norm_target, target_b.domain))
 
-    # Process each engine run
+    # PASS 1: Brand discovery and evidence extraction across ALL engines
     for engine_name, res in engine_results.items():
-        is_success = (res.status == "success")
-
-        # Map of resolved_brand_name -> list of product items in this engine run
-        engine_brand_products: Dict[str, List[ProductEvidence]] = {}
-
-        if is_success and res.parse_result and res.parse_result.recommendations:
+        if res.parse_result and res.parse_result.recommendations:
             for rec in res.parse_result.recommendations:
                 candidate_brand = rec.brand.strip()
                 if not candidate_brand:
@@ -131,38 +136,70 @@ def aggregate_brands(
                     engine=engine_name,
                 )
 
-                if norm_key not in engine_brand_products:
-                    engine_brand_products[norm_key] = []
-                engine_brand_products[norm_key].append(evidence)
+                if norm_key not in engine_evidence[engine_name]:
+                    engine_evidence[engine_name][norm_key] = []
+                engine_evidence[engine_name][norm_key].append(evidence)
 
-        # For every brand known so far, record its observation for this engine
-        for norm_key, brand in brand_map.items():
-            if norm_key in engine_brand_products:
-                products = engine_brand_products[norm_key]
-                best_rank = min(p.rank for p in products)
-                pos_score = get_position_score(best_rank)
-                obs = EngineObservation(
-                    engine=engine_name,
-                    status=res.status,
-                    mentioned=True,
-                    best_rank=best_rank,
-                    position_score=pos_score,
-                    products=products,
-                    latency_ms=res.latency_ms,
-                    error_type=res.error_type,
-                )
-                brand.products.extend(products)
+    # PASS 2: Populate explicit EngineObservation for EVERY brand across EVERY configured engine
+    for norm_key, brand in brand_map.items():
+        brand.products = []
+        for engine_name, res in engine_results.items():
+            products = engine_evidence[engine_name].get(norm_key, [])
+            brand.products.extend(products)
+            has_products = len(products) > 0
+
+            if res.status == "success":
+                if has_products:
+                    best_rank = min(p.rank for p in products)
+                    pos_score = get_position_score(best_rank)
+                    obs = EngineObservation(
+                        engine=engine_name,
+                        status="success",
+                        mentioned=True,
+                        best_rank=best_rank,
+                        position_score=pos_score,
+                        products=products,
+                        latency_ms=res.latency_ms,
+                        error_type=None,
+                    )
+                else:
+                    obs = EngineObservation(
+                        engine=engine_name,
+                        status="success",
+                        mentioned=False,
+                        best_rank=None,
+                        position_score=0.0,
+                        products=[],
+                        latency_ms=res.latency_ms,
+                        error_type=None,
+                    )
             else:
-                obs = EngineObservation(
-                    engine=engine_name,
-                    status=res.status,
-                    mentioned=False,
-                    best_rank=None,
-                    position_score=0.0,
-                    products=[],
-                    latency_ms=res.latency_ms,
-                    error_type=res.error_type,
-                )
+                # Engine was partial, invalid, or failed
+                # Partial/invalid products remain accessible in evidence, but do not count as a valid success score
+                if has_products:
+                    best_rank = min(p.rank for p in products)
+                    obs = EngineObservation(
+                        engine=engine_name,
+                        status=res.status,
+                        mentioned=True,
+                        best_rank=best_rank,
+                        position_score=0.0,
+                        products=products,
+                        latency_ms=res.latency_ms,
+                        error_type=res.error_type,
+                    )
+                else:
+                    obs = EngineObservation(
+                        engine=engine_name,
+                        status=res.status,
+                        mentioned=False,
+                        best_rank=None,
+                        position_score=0.0,
+                        products=[],
+                        latency_ms=res.latency_ms,
+                        error_type=res.error_type,
+                    )
+
             brand.observations[engine_name] = obs
 
     # Calculate deterministic metrics for each brand
@@ -177,7 +214,7 @@ def aggregate_brands(
         ]
         brand.mentioned_engine_count = len(mentioned_in_successful)
 
-        # Engine availability
+        # Engine availability = successful engines / configured engines
         brand.engine_availability = (
             round((num_successful / configured_engine_count) * 100.0, 1)
             if configured_engine_count > 0 else 0.0
@@ -322,19 +359,21 @@ def generate_typed_insights(
     successful_count = sum(1 for res in engine_results.values() if res.status == "success")
     failed_engines = [eng for eng, res in engine_results.items() if res.status == "failed"]
     invalid_engines = [eng for eng, res in engine_results.items() if res.status == "invalid"]
+    partial_engines = [eng for eng, res in engine_results.items() if res.status == "partial"]
 
     # 1. Engine Availability Insight
-    if failed_engines or invalid_engines:
-        affected = failed_engines + invalid_engines
+    if failed_engines or invalid_engines or partial_engines:
+        affected = failed_engines + invalid_engines + partial_engines
         insights.append({
             "type": "warning",
             "title": "Incomplete Engine Diagnostic",
-            "message": f"{len(affected)} of {configured_count} models ({', '.join(affected)}) encountered connectivity or parsing failures during this run.",
+            "message": f"{len(affected)} of {configured_count} models ({', '.join(affected)}) encountered connectivity, parsing, or partial output issues during this run.",
             "evidence": {
                 "configured": configured_count,
                 "successful": successful_count,
                 "failed": failed_engines,
                 "invalid": invalid_engines,
+                "partial": partial_engines,
             },
         })
     else:

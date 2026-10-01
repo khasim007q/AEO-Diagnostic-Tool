@@ -151,8 +151,14 @@ class TestDiagnosticExecution:
         # BrandResult & Competitors
         assert data["target_brand"] is not None
         assert data["target_brand"]["name"] == "Nike"
+        assert "supporting_metrics" in data["target_brand"]
+        assert "observations" in data["target_brand"]
+        assert "metrics" not in data["target_brand"]
+        assert "engine_observations" not in data["target_brand"]
         assert len(data["competitors"]) >= 1
         assert data["competitors"][0]["name"] == "Adidas"
+        assert "supporting_metrics" in data["competitors"][0]
+        assert "observations" in data["competitors"][0]
 
         # Signed Gap Analysis (Nike score 90.0 vs Adidas score 90.0 -> gap 0.0)
         assert isinstance(data["gap_analysis"], list)

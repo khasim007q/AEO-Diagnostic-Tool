@@ -23,7 +23,7 @@ export type ProductEvidence = z.infer<typeof ProductEvidenceSchema>;
 
 export const EngineObservationSchema = z.object({
   engine: z.string(),
-  status: z.enum(["success", "failed", "invalid"]),
+  status: z.enum(["success", "partial", "invalid", "failed"]),
   mentioned: z.boolean(),
   best_rank: z.number().nullable().optional(),
   position_score: z.number(),

@@ -1,25 +1,19 @@
 # entity_resolution.py
 import re
+import unicodedata
 from typing import List, Optional, Tuple, Dict
 from thefuzz import fuzz
 
-# Common legal and corporate entity suffixes to normalize away
-LEGAL_SUFFIXES = [
-    r'\binc\.?\b',
-    r'\bincorporated\b',
-    r'\bcorp\.?\b',
-    r'\bcorporation\b',
-    r'\bllc\b',
-    r'\bltd\.?\b',
-    r'\blimited\b',
-    r'\bco\.?\b',
-    r'\bcompany\b',
-    r'\bgmbh\b',
-    r'\bpvt\.?\b',
-    r'\bplc\b',
-]
+# Common legal and corporate entity suffixes to normalize away only when trailing
+TRAILING_LEGAL_SUFFIX_PATTERN = (
+    r'(?:,\s*|\s+)(?:inc|incorporated|corp|corporation|llc|ltd|limited|gmbh|pvt|plc)\.?$'
+)
+TRAILING_CO_PATTERN = r'(?:,\s*|\s+)(?:co|company)\.?$'
 
-# Known brand aliases for high-confidence canonical resolution
+# Explicit canonical brand aliases
+# CRITICAL: Do NOT merge corporate parents, subsidiaries, and separate business units.
+# Separate: AWS != Amazon, Facebook != Meta, Alphabet != Google.
+# Only safe brand abbreviations and exact identity variants belong here.
 KNOWN_ALIASES: Dict[str, str] = {
     "on": "optimum nutrition",
     "optimum": "optimum nutrition",
@@ -28,12 +22,6 @@ KNOWN_ALIASES: Dict[str, str] = {
     "nike athletic": "nike",
     "microsoft corp": "microsoft",
     "msft": "microsoft",
-    "google llc": "google",
-    "alphabet": "google",
-    "meta platforms": "meta",
-    "facebook": "meta",
-    "aws": "amazon",
-    "amazon web services": "amazon",
     "nature made vitamins": "nature made",
     "dymatize nutrition": "dymatize",
     "myprotein uk": "myprotein",
@@ -45,22 +33,44 @@ KNOWN_ALIASES: Dict[str, str] = {
 def normalize_brand_name(name: str) -> str:
     """Normalize a brand name for consistent entity resolution.
 
-    Strips common corporate suffixes, punctuation, and extraneous whitespace.
+    - Decomposes Unicode diacritics (e.g. é -> e in L'Oréal).
+    - Unifies Unicode apostrophes and punctuation variations.
+    - Preserves internal meaningful characters (e.g. 'Co-op', 'Coca-Cola').
+    - Removes corporate legal suffixes (Inc, LLC) strictly in trailing position.
     """
     if not name:
         return ""
 
-    lowered = name.lower().strip()
+    # Remove quotes, trademarks, and parenthesis content BEFORE unicode NFKD decomposition
+    # because NFKD decomposes ™ into 'TM'
+    pre_cleaned = re.sub(r'[\"®™©\u2122\u00ae\u00a9\u201c\u201d]', '', name)
+    pre_cleaned = re.sub(r'\((?:tm|r|c)\)', '', pre_cleaned, flags=re.IGNORECASE)
+    pre_cleaned = re.sub(r'\([^)]*\)', '', pre_cleaned)
 
-    # Remove quotes, trademarks, and parenthesis content
-    cleaned = re.sub(r'[\'\"®™©]', '', lowered)
-    cleaned = re.sub(r'\([^)]*\)', '', cleaned)
+    # Decompose Unicode accents
+    decomposed = unicodedata.normalize("NFKD", pre_cleaned)
+    stripped_accents = "".join(c for c in decomposed if not unicodedata.combining(c))
+    lowered = stripped_accents.lower().strip()
 
-    # Remove common corporate suffixes
-    for suffix_pattern in LEGAL_SUFFIXES:
-        cleaned = re.sub(suffix_pattern, '', cleaned, flags=re.IGNORECASE)
+    # Handle apostrophe variations: 's -> s, otherwise replace with space (e.g. L'Oreal -> l oreal)
+    cleaned = re.sub(r"['’‘`ʻ]s\b", "s", lowered)
+    cleaned = re.sub(r"['’‘`ʻ]", " ", cleaned)
 
-    # Replace hyphens and slashes with space, remove symbols
+    # Context-aware trailing legal suffix removal (only at the end of the brand string)
+    # E.g. "Apple Inc." -> "apple", "Nike LLC" -> "nike", but "Co-op" or "Company A" is preserved
+    m_legal = re.search(TRAILING_LEGAL_SUFFIX_PATTERN, cleaned, flags=re.IGNORECASE)
+    if m_legal and len(cleaned[:m_legal.start()].strip()) >= 2:
+        cleaned = cleaned[:m_legal.start()].strip()
+
+    # Trailing "co" or "company" removal only if preceded by multiple words (e.g. "Coca-Cola Co.")
+    m_co = re.search(TRAILING_CO_PATTERN, cleaned, flags=re.IGNORECASE)
+    if m_co:
+        prefix = cleaned[:m_co.start()].strip()
+        # Only remove if the prefix is substantive (at least 4 chars and not a standalone single word)
+        if len(prefix) >= 4 and len(prefix.split()) >= 1:
+            cleaned = prefix
+
+    # Replace hyphens, slashes, and symbols with space
     cleaned = re.sub(r'[-_/&+,.]', ' ', cleaned)
 
     # Collapse multiple whitespaces
@@ -73,8 +83,22 @@ def normalize_brand_name(name: str) -> str:
     return cleaned
 
 
+def normalize_text_for_search(text: str) -> str:
+    """Normalize a title or snippet text for symmetric brand containment search."""
+    if not text:
+        return ""
+    pre_cleaned = re.sub(r'[\"®™©\u2122\u00ae\u00a9\u201c\u201d]', '', text)
+    decomposed = unicodedata.normalize("NFKD", pre_cleaned)
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    lowered = stripped.lower()
+    lowered = re.sub(r"['’‘`ʻ]s\b", "s", lowered)
+    lowered = re.sub(r"['’‘`ʻ]", " ", lowered)
+    lowered = re.sub(r'[^a-z0-9\s]', ' ', lowered)
+    return re.sub(r'\s+', ' ', lowered).strip()
+
+
 def extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
-    """Extract clean domain name from URL or host string."""
+    """Extract clean domain hostname from URL or host string."""
     if not url_or_domain:
         return None
 
@@ -86,6 +110,32 @@ def extract_domain(url_or_domain: Optional[str]) -> Optional[str]:
     # Strip www
     cleaned = re.sub(r'^www\.', '', cleaned)
     return cleaned if cleaned else None
+
+
+def is_domain_match(target_domain: Optional[str], candidate_domain: Optional[str]) -> bool:
+    """Evaluate exact hostname or valid subdomain matching.
+
+    Prevents false positives such as:
+    target: nike.com
+    matching: nike.com.example.com or faknike.com
+    """
+    if not target_domain or not candidate_domain:
+        return False
+
+    t = extract_domain(target_domain)
+    c = extract_domain(candidate_domain)
+    if not t or not c:
+        return False
+
+    # Exact hostname match
+    if t == c:
+        return True
+
+    # Valid subdomain match (e.g. store.nike.com or running.nike.com matches nike.com)
+    if c.endswith("." + t):
+        return True
+
+    return False
 
 
 def resolve_brand_entity(
@@ -100,7 +150,7 @@ def resolve_brand_entity(
     Priority order:
     1. Exact normalized match
     2. Explicit alias match
-    3. Domain match
+    3. Exact/subdomain domain match
     4. Strong deterministic containment (word boundaries)
     5. High-confidence fuzzy match (threshold >= 88)
     6. Ambiguity check (reject if multiple candidates are equally close)
@@ -125,12 +175,12 @@ def resolve_brand_entity(
         if alias_candidate == norm_name:
             return orig_name
 
-    # 3. Domain match
+    # 3. Domain match (using strict hostname/subdomain check)
     if norm_cand_domain:
         for orig_name, norm_name, known_domain in known_brands:
-            if known_domain and norm_cand_domain == extract_domain(known_domain):
+            if known_domain and is_domain_match(known_domain, norm_cand_domain):
                 return orig_name
-            # Check if domain root matches brand
+            # Check if domain root exactly equals the normalized brand name
             domain_root = norm_cand_domain.split('.')[0]
             if domain_root == norm_name:
                 return orig_name
@@ -138,12 +188,12 @@ def resolve_brand_entity(
     # 4. Strong deterministic containment
     # Ensure word boundaries so "Nike" matches "Nike Running", but "Son" does not match "Sony"
     containment_matches: List[str] = []
+    cand_words = set(norm_candidate.split())
     for orig_name, norm_name, _ in known_brands:
-        # Check if one is a complete whole-word component of the other
-        cand_words = set(norm_candidate.split())
         brand_words = set(norm_name.split())
-        if cand_words.issubset(brand_words) or brand_words.issubset(cand_words):
-            containment_matches.append(orig_name)
+        if cand_words and brand_words:
+            if cand_words.issubset(brand_words) or brand_words.issubset(cand_words):
+                containment_matches.append(orig_name)
 
     if len(containment_matches) == 1:
         return containment_matches[0]
@@ -154,7 +204,6 @@ def resolve_brand_entity(
     # 5. Fuzzy match with ambiguity detection
     fuzzy_candidates: List[Tuple[str, int]] = []
     for orig_name, norm_name, _ in known_brands:
-        # Use token_sort_ratio for robust word ordering
         score = fuzz.token_sort_ratio(norm_candidate, norm_name)
         if score >= 88:
             fuzzy_candidates.append((orig_name, score))
@@ -162,7 +211,6 @@ def resolve_brand_entity(
     if not fuzzy_candidates:
         return None
 
-    # Sort descending by score
     fuzzy_candidates.sort(key=lambda x: x[1], reverse=True)
 
     # 6. Ambiguity check: if top 2 candidates are within 5 points, reject
@@ -170,7 +218,6 @@ def resolve_brand_entity(
         top_score = fuzzy_candidates[0][1]
         runner_up_score = fuzzy_candidates[1][1]
         if top_score - runner_up_score < 5:
-            # Ambiguous resolution, do not guess
             return None
 
     return fuzzy_candidates[0][0]

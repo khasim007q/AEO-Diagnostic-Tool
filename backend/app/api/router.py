@@ -1,4 +1,4 @@
-# router.py
+import uuid
 import time
 import logging
 import asyncio
@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from collections import defaultdict
 from fastapi import APIRouter, HTTPException, Request
 
+from app.config import settings
 from app.api.schemas import (
     DiagnosticRequest,
     DiagnosticResponse,
@@ -37,25 +38,33 @@ logger = logging.getLogger(__name__)
 api_router = APIRouter()
 
 # Global semaphore to bound concurrent expensive diagnostic runs
-CONCURRENCY_SEMAPHORE = asyncio.Semaphore(5)
+CONCURRENCY_SEMAPHORE = asyncio.Semaphore(settings.CONCURRENCY_LIMIT)
 
-# In-memory sliding window rate limiter: IP -> list of request timestamps
-RATE_LIMIT_WINDOW_SECONDS = 60
-MAX_REQUESTS_PER_WINDOW = 15
+# Bounded in-memory sliding window rate limiter: IP -> list of request timestamps
 _ip_request_timestamps: Dict[str, List[float]] = defaultdict(list)
 
 
 def _check_rate_limit(client_ip: str) -> None:
-    """Enforce a simple in-memory sliding window rate limit per client IP."""
+    """Enforce a bounded in-memory sliding window rate limit per client IP."""
     now = time.time()
-    timestamps = _ip_request_timestamps[client_ip]
+    cutoff = now - settings.RATE_LIMIT_WINDOW_SECONDS
 
-    # Purge timestamps outside window
-    cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+    # Prune stale entries if map is getting large
+    if len(_ip_request_timestamps) > settings.MAX_RATE_LIMIT_ENTRIES:
+        stale_ips = [ip for ip, ts_list in _ip_request_timestamps.items() if not ts_list or max(ts_list) <= cutoff]
+        for ip in stale_ips:
+            _ip_request_timestamps.pop(ip, None)
+        # If still over limit, drop oldest
+        if len(_ip_request_timestamps) > settings.MAX_RATE_LIMIT_ENTRIES:
+            sorted_ips = sorted(_ip_request_timestamps.items(), key=lambda item: max(item[1]) if item[1] else 0)
+            for ip, _ in sorted_ips[:len(_ip_request_timestamps) - settings.MAX_RATE_LIMIT_ENTRIES]:
+                _ip_request_timestamps.pop(ip, None)
+
+    timestamps = _ip_request_timestamps[client_ip]
     valid_timestamps = [t for t in timestamps if t > cutoff]
     _ip_request_timestamps[client_ip] = valid_timestamps
 
-    if len(valid_timestamps) >= MAX_REQUESTS_PER_WINDOW:
+    if len(valid_timestamps) >= settings.RATE_LIMIT_MAX_REQUESTS:
         logger.warning("Rate limit exceeded for IP: %s", client_ip)
         raise HTTPException(
             status_code=429,
@@ -72,11 +81,13 @@ async def run_diagnostic(request: DiagnosticRequest, req: Request):
     client_ip = req.client.host if req.client else "unknown"
     _check_rate_limit(client_ip)
 
-    # 2. Concurrency limiting
+    # 2. Concurrency limiting and time budgeting
+    deadline = time.monotonic() + settings.DIAGNOSTIC_TIMEOUT_SECONDS
+
     async with CONCURRENCY_SEMAPHORE:
         try:
             # 3. Concurrent execution: LLM queries and Google Search run in parallel
-            llm_task = asyncio.create_task(query_llms_parallel(request.query))
+            llm_task = asyncio.create_task(query_llms_parallel(request.query, deadline=deadline))
             google_task = asyncio.create_task(
                 search_google_corroboration(
                     query=request.query,
@@ -89,23 +100,27 @@ async def run_diagnostic(request: DiagnosticRequest, req: Request):
                 )
             )
 
-            # Wait for both tasks concurrently with a hard timeout of 40s
+            # Wait for both tasks concurrently with a hard timeout
             llm_results, google_summary = await asyncio.wait_for(
                 asyncio.gather(llm_task, google_task),
-                timeout=40.0,
+                timeout=settings.DIAGNOSTIC_TIMEOUT_SECONDS + 5.0,
             )
 
         except asyncio.TimeoutError:
-            logger.error("Diagnostic execution timed out after 40 seconds")
+            req_id = str(uuid.uuid4())
+            logger.error("Diagnostic execution timed out [req_id=%s]", req_id)
             raise HTTPException(
                 status_code=504,
-                detail="Diagnostic timed out while waiting for evaluation models or search results.",
+                detail=f"Diagnostic request timed out while contacting evaluation models. Request ID: {req_id}",
             )
+        except HTTPException:
+            raise
         except Exception as exc:
-            logger.error("Diagnostic execution failed: %s", exc, exc_info=True)
+            req_id = str(uuid.uuid4())
+            logger.error("Diagnostic execution failed [req_id=%s]: %s", req_id, exc, exc_info=True)
             raise HTTPException(
                 status_code=500,
-                detail=f"An error occurred during diagnostic execution: {str(exc)}",
+                detail=f"An internal error occurred during diagnostic execution. Request ID: {req_id}",
             )
 
     # 4. Deterministic Brand Aggregation & Scoring
@@ -301,9 +316,10 @@ def _map_brand_to_schema(brand: Brand) -> BrandResultSchema:
     return BrandResultSchema(
         name=brand.name,
         normalized_name=brand.normalized_name,
+        domain=brand.domain,
         ai_visibility_score=brand.ai_visibility_score,
         visibility_label=get_visibility_label(brand.ai_visibility_score, brand.mentioned_engine_count > 0),
-        metrics=_map_supporting_metrics(brand),
-        engine_observations=observations_schema,
+        supporting_metrics=_map_supporting_metrics(brand),
+        observations=observations_schema,
         products=products_schema,
     )

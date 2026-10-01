@@ -127,10 +127,10 @@ npm run dev
 
 ### Running Test Suites
 ```bash
-# Backend tests (89 tests covering parser, scoring, fuzzy matching, segmentation, api)
+# Backend tests (97 tests covering parser, scoring, fuzzy matching, segmentation, api)
 pytest backend/tests/ -v
 
-# Frontend tests (20 tests covering UI components, charts, and API validation)
+# Frontend tests (21 tests covering UI components, charts, and API validation)
 cd frontend
 npm test
 

@@ -32,18 +32,19 @@ export default function RankingChart({
 
   // Take top 8 brands by AI Visibility Score
   const chartData = brands.slice(0, 8).map((brand) => {
-    const item: Record<string, string | number> = {
+    const item: Record<string, string | number | null> = {
       name: brand.name,
       Overall: brand.ai_visibility_score,
     };
 
     engineNames.forEach((engine) => {
       const obs = brand.observations[engine];
-      if (obs && obs.status === "success" && obs.mentioned) {
-        // Use backend position_score * 100 directly (0 to 100)
-        item[engine] = Math.round(obs.position_score * 100);
+      if (obs && obs.status === "success") {
+        item[engine] = obs.mentioned ? Math.round(obs.position_score * 100) : 0;
       } else {
-        item[engine] = 0;
+        // Render failed, partial, or invalid engine runs as null (gap in chart)
+        // rather than falsely asserting 0% visibility for an engine that failed
+        item[engine] = null;
       }
     });
 
@@ -55,7 +56,7 @@ export default function RankingChart({
       <div className="mb-4">
         <h3 className="text-lg font-bold text-foreground">Cross-Engine Visibility Benchmark</h3>
         <p className="text-xs text-muted-foreground">
-          Deterministic position score (0 to 100) per engine based on highest observed brand rank.
+          Deterministic position score (0 to 100) per engine based on highest observed brand rank. Non-successful engines appear as gaps.
         </p>
       </div>
 
@@ -90,7 +91,12 @@ export default function RankingChart({
             />
             <Tooltip
               cursor={{ fill: "hsl(var(--muted))", opacity: 0.2 }}
-              formatter={(value: unknown, name: unknown) => [`${value}%`, String(name)]}
+              formatter={(value: unknown, name: unknown) => {
+                if (value === null || value === undefined) {
+                  return ["Unavailable / Not scored", String(name)];
+                }
+                return [`${value}%`, String(name)];
+              }}
               contentStyle={{
                 backgroundColor: "hsl(var(--popover))",
                 border: "1px solid hsl(var(--border))",

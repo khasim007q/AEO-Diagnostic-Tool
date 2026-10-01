@@ -1,6 +1,5 @@
-// BrandTable.tsx
 import React, { useState } from "react";
-import { BrandResult, EngineSummary } from "../lib/types";
+import { BrandResult, EngineSummary, ProductEvidence } from "../lib/types";
 import { ChevronDown, ChevronRight, Package, ShieldCheck } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -8,6 +7,33 @@ interface BrandTableProps {
   brands: BrandResult[];
   targetBrand?: BrandResult | null;
   engineSummaries: EngineSummary[];
+}
+
+interface AggregatedProduct {
+  name: string;
+  engineRanks: Record<string, number>;
+  bestRank: number;
+}
+
+function aggregateBrandProducts(products: ProductEvidence[]): AggregatedProduct[] {
+  const groups: Record<string, AggregatedProduct> = {};
+
+  for (const p of products) {
+    const key = p.product_name.toLowerCase().trim();
+    if (!groups[key]) {
+      groups[key] = {
+        name: p.product_name,
+        engineRanks: {},
+        bestRank: p.rank,
+      };
+    }
+    groups[key].engineRanks[p.engine] = p.rank;
+    if (p.rank < groups[key].bestRank) {
+      groups[key].bestRank = p.rank;
+    }
+  }
+
+  return Object.values(groups).sort((a, b) => a.bestRank - b.bestRank);
 }
 
 export default function BrandTable({
@@ -39,7 +65,7 @@ export default function BrandTable({
         <div>
           <h3 className="text-lg font-bold text-foreground">Brand Ranking Hierarchy</h3>
           <p className="text-xs text-muted-foreground">
-            Brands are evaluated by their best rank per successful engine. Expand any brand to inspect returned product evidence.
+            Brands are evaluated by their best rank per successful engine. Expand any brand to inspect aggregated product models across engines.
           </p>
         </div>
         <div className="text-xs text-muted-foreground font-medium">
@@ -66,6 +92,8 @@ export default function BrandTable({
             {brands.map((brand) => {
               const isTarget = isTargetBrand(brand.name);
               const isExpanded = expandedBrands.has(brand.name);
+              const aggregatedProducts = aggregateBrandProducts(brand.products);
+
               return (
                 <React.Fragment key={brand.name}>
                   <tr
@@ -92,7 +120,7 @@ export default function BrandTable({
                         )}
                         {brand.products.length > 0 && (
                           <span className="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                            {brand.products.length} product{brand.products.length === 1 ? "" : "s"}
+                            {aggregatedProducts.length} model{aggregatedProducts.length === 1 ? "" : "s"} ({brand.products.length} mention{brand.products.length === 1 ? "" : "s"})
                           </span>
                         )}
                       </div>
@@ -115,8 +143,26 @@ export default function BrandTable({
                       if (obs.status === "failed") {
                         return (
                           <td key={engine} className="px-4 py-4 text-center">
-                            <span className="text-xs px-2 py-0.5 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400">
+                            <span className="text-xs px-2 py-0.5 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/20">
                               Failed
+                            </span>
+                          </td>
+                        );
+                      }
+                      if (obs.status === "invalid") {
+                        return (
+                          <td key={engine} className="px-4 py-4 text-center">
+                            <span className="text-xs px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                              Invalid
+                            </span>
+                          </td>
+                        );
+                      }
+                      if (obs.status === "partial") {
+                        return (
+                          <td key={engine} className="px-4 py-4 text-center">
+                            <span className="text-xs px-2 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                              Partial
                             </span>
                           </td>
                         );
@@ -152,7 +198,7 @@ export default function BrandTable({
                               <Package className="w-3.5 h-3.5 text-primary" />
                               Product Evidence for {brand.name}
                             </div>
-                            {brand.products.length === 0 ? (
+                            {aggregatedProducts.length === 0 ? (
                               <p className="text-xs text-muted-foreground italic py-2">
                                 No specific product models were extracted for this brand mention.
                               </p>
@@ -160,22 +206,34 @@ export default function BrandTable({
                               <table className="w-full text-xs">
                                 <thead>
                                   <tr className="text-muted-foreground border-b border-border/50 text-left">
-                                    <th className="py-2 font-medium">Model / Product Name</th>
-                                    <th className="py-2 font-medium">Observed Engine</th>
-                                    <th className="py-2 font-medium text-right">Engine Rank</th>
+                                    <th className="py-2 font-medium">Product / Model</th>
+                                    <th className="py-2 font-medium">Observed Engines &amp; Ranks</th>
+                                    <th className="py-2 font-medium text-right">Best Rank</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border/40">
-                                  {brand.products.map((prod, idx) => (
-                                    <tr key={`${prod.engine}-${prod.rank}-${idx}`}>
-                                      <td className="py-2 font-medium text-foreground">
-                                        {prod.product_name}
+                                  {aggregatedProducts.map((prod) => (
+                                    <tr key={prod.name}>
+                                      <td className="py-2.5 font-medium text-foreground">
+                                        {prod.name}
                                       </td>
-                                      <td className="py-2 text-muted-foreground">
-                                        {prod.engine}
+                                      <td className="py-2.5 text-muted-foreground">
+                                        <div className="flex flex-wrap gap-1.5 items-center">
+                                          {Object.entries(prod.engineRanks).map(([eng, rank]) => (
+                                            <span
+                                              key={eng}
+                                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-muted/80 text-foreground text-[11px] font-medium border border-border/50"
+                                            >
+                                              <span className="text-muted-foreground">{eng}:</span>
+                                              <span className="font-semibold text-primary">#{rank}</span>
+                                            </span>
+                                          ))}
+                                        </div>
                                       </td>
-                                      <td className="py-2 text-right font-semibold text-foreground">
-                                        #{prod.rank}
+                                      <td className="py-2.5 text-right font-semibold text-foreground">
+                                        <span className="inline-block px-2 py-0.5 rounded bg-primary/10 text-primary text-xs font-bold">
+                                          #{prod.bestRank}
+                                        </span>
                                       </td>
                                     </tr>
                                   ))}

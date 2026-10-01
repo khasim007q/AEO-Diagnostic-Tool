@@ -26,7 +26,7 @@ class ProductEvidenceSchema(BaseModel):
 class EngineObservationSchema(BaseModel):
     """Scoring observation for a brand within a specific engine run."""
     engine: str
-    status: str  # "success" | "failed" | "invalid"
+    status: str  # "success" | "partial" | "invalid" | "failed"
     mentioned: bool
     best_rank: Optional[int] = None
     position_score: float
@@ -54,10 +54,11 @@ class BrandResultSchema(BaseModel):
     """Ranked brand entity containing metrics and product evidence."""
     name: str
     normalized_name: str
+    domain: Optional[str] = None
     ai_visibility_score: float  # 0 to 100
     visibility_label: str  # "High visibility", "Moderate visibility", etc.
-    metrics: SupportingMetricsSchema
-    engine_observations: Dict[str, EngineObservationSchema] = Field(default_factory=dict)
+    supporting_metrics: SupportingMetricsSchema
+    observations: Dict[str, EngineObservationSchema] = Field(default_factory=dict)
     products: List[ProductEvidenceSchema] = Field(default_factory=list)
 
 

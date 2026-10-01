@@ -235,3 +235,116 @@ class TestTypedInsights:
             # Must NOT contain forbidden causal text
             assert "Improving SEO will boost AI visibility" not in insight["message"]
             assert "Google validates the AI recommendation" not in insight["message"]
+
+
+class TestEngineStatusScoringExclusionAndCompleteness:
+    """Tests proving strict status isolation and complete observation matrices."""
+
+    def test_valid_response_participates_and_partial_failed_excluded(self):
+        """1 valid engine (success), 1 partial engine, 1 invalid engine, 1 failed engine.
+
+        Only the 1 valid engine participates in the AI Visibility Score denominator.
+        Score must be 100 * (1.0) / 1 = 100.0, NOT 100 * (1.0) / 4 = 25.0.
+        Engine availability = 1/4 (25.0%).
+        Mention coverage = 1/1 (100.0%).
+        """
+        nike_rec = [ParsedRecommendation(rank=1, brand="Nike", product="Nike Pegasus")]
+        partial_recs = [ParsedRecommendation(rank=3, brand="Nike", product="Nike Streak")]
+
+        results = {
+            "EngineValid": EngineExecutionResult(
+                engine="EngineValid",
+                status="success",
+                parse_result=ParseResult(status="valid", recommendations=nike_rec),
+            ),
+            "EnginePartial": EngineExecutionResult(
+                engine="EnginePartial",
+                status="partial",
+                parse_result=ParseResult(status="partial", recommendations=partial_recs),
+            ),
+            "EngineInvalid": EngineExecutionResult(
+                engine="EngineInvalid",
+                status="invalid",
+                error_type="validation_error",
+                error_message="Duplicate ranks",
+            ),
+            "EngineFailed": EngineExecutionResult(
+                engine="EngineFailed",
+                status="failed",
+                error_type="timeout",
+                error_message="Request timed out",
+            ),
+        }
+
+        all_brands, target, _ = aggregate_brands(results, target_brand_name="Nike")
+        assert target is not None
+        assert target.name == "Nike"
+        assert target.configured_engine_count == 4
+        assert target.successful_engine_count == 1
+        assert target.mentioned_engine_count == 1
+        assert target.engine_availability == 25.0
+        assert target.mention_coverage == 100.0
+        # Valid engine had rank 1 -> 1.00 position score -> 100.0 / 1 = 100.0
+        assert target.ai_visibility_score == 100.0
+
+        # Partial engine still exposes its product evidence
+        obs_partial = target.observations["EnginePartial"]
+        assert obs_partial.status == "partial"
+        assert obs_partial.position_score == 0.0
+        assert len(obs_partial.products) == 1
+        assert obs_partial.products[0].product_name == "Nike Streak"
+
+        # Failed engine is present
+        obs_failed = target.observations["EngineFailed"]
+        assert obs_failed.status == "failed"
+        assert obs_failed.error_type == "timeout"
+
+    def test_every_brand_has_every_engine_observation_matrix(self):
+        """Discovered brands in different engines must all receive an observation for every engine."""
+        recs_e1 = [ParsedRecommendation(rank=1, brand="BrandOne", product="Prod One")]
+        recs_e2 = [ParsedRecommendation(rank=2, brand="BrandTwo", product="Prod Two")]
+        recs_e3 = [ParsedRecommendation(rank=3, brand="BrandThree", product="Prod Three")]
+
+        results = {
+            "E1": EngineExecutionResult(
+                engine="E1",
+                status="success",
+                parse_result=ParseResult(status="valid", recommendations=recs_e1),
+            ),
+            "E2": EngineExecutionResult(
+                engine="E2",
+                status="success",
+                parse_result=ParseResult(status="valid", recommendations=recs_e2),
+            ),
+            "E3": EngineExecutionResult(
+                engine="E3",
+                status="success",
+                parse_result=ParseResult(status="valid", recommendations=recs_e3),
+            ),
+        }
+
+        all_brands, _, _ = aggregate_brands(results)
+        assert len(all_brands) == 3
+
+        for brand in all_brands:
+            assert len(brand.observations) == 3
+            assert set(brand.observations.keys()) == {"E1", "E2", "E3"}
+            for eng, obs in brand.observations.items():
+                assert obs.engine == eng
+                assert obs.status == "success"
+
+        # Check BrandOne specifically
+        b1 = next(b for b in all_brands if b.name == "BrandOne")
+        assert b1.observations["E1"].mentioned is True
+        assert b1.observations["E1"].best_rank == 1
+        assert b1.observations["E2"].mentioned is False
+        assert b1.observations["E2"].best_rank is None
+        assert b1.observations["E3"].mentioned is False
+        assert b1.observations["E3"].best_rank is None
+
+        # Check BrandTwo specifically
+        b2 = next(b for b in all_brands if b.name == "BrandTwo")
+        assert b2.observations["E1"].mentioned is False
+        assert b2.observations["E2"].mentioned is True
+        assert b2.observations["E2"].best_rank == 2
+        assert b2.observations["E3"].mentioned is False
