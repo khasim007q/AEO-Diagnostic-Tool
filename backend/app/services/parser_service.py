@@ -2,58 +2,56 @@
 import json
 import re
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
-# Characters preserved in brand names during regex extraction
 BRAND_CHARS = r"[A-Za-z0-9 \t\'\-\&\.\%\+\#\(\)]"
 
 
-def parse_llm_response(raw_text: str) -> List[Dict[str, Any]]:
-    """Parse an LLM response into a list of brand/product dicts.
-
-    Tries multiple strategies in order:
-    1. Direct JSON array parsing
-    2. JSON extraction from markdown/prose
-    3. Truncated JSON recovery
-    4. Regex-based key extraction from malformed JSON
-    5. Numbered/bulleted list regex fallback
-
-    Args:
-        raw_text: The raw text from an LLM response.
-
-    Returns:
-        List of dicts with keys: brand, product, rank.
-    """
-    if not raw_text or raw_text.startswith("ERROR:") or raw_text.startswith("API ERROR"):
-        return []
-
-    # Try JSON-based parsing first
-    json_result = _parse_json(raw_text)
-    if json_result:
-        return json_result[:5]
-
-    # Fall back to regex extraction from structured text
-    regex_result = _extract_brands_regex(raw_text)
-    if regex_result:
-        return regex_result[:5]
-
-    return []
+@dataclass
+class ParsedRecommendation:
+    rank: int
+    brand: str
+    product: str
 
 
-def _parse_json(text: str) -> Optional[List[Dict[str, Any]]]:
-    """Attempt to parse JSON from LLM text using multiple strategies.
+@dataclass
+class ParseResult:
+    status: str  # "valid" | "partial" | "invalid" | "low_confidence"
+    recommendations: List[ParsedRecommendation] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
 
-    Args:
-        text: Raw LLM response text.
+    @property
+    def is_usable(self) -> bool:
+        """A response is usable if it has at least one valid recommendation."""
+        return len(self.recommendations) > 0 and self.status in ("valid", "partial", "low_confidence")
+
+
+def parse_llm_response_detailed(raw_text: Optional[str]) -> ParseResult:
+    """Parse and strictly validate an LLM response into structured recommendations.
+
+    Rejects:
+    - rank 0 or rank 6+
+    - duplicate ranks
+    - missing ranks
+    - malformed objects
+    - empty brand or empty product strings
+    Does NOT silently repair invalid ranks into guessed sequential numbers.
 
     Returns:
-        List of parsed brand dicts, or None on failure.
+        ParseResult with status, recommendations, and diagnostic errors.
     """
-    cleaned = text.strip()
+    if not raw_text or not isinstance(raw_text, str):
+        return ParseResult(status="invalid", errors=["Empty or non-string response"])
 
-    # Strip markdown code fences
+    trimmed = raw_text.strip()
+    if trimmed.startswith("ERROR:") or trimmed.startswith("API ERROR"):
+        return ParseResult(status="invalid", errors=[trimmed])
+
+    # Strip markdown code fences if present
+    cleaned = trimmed
     if cleaned.startswith("```"):
         first_newline = cleaned.find("\n")
         if first_newline != -1:
@@ -64,231 +62,194 @@ def _parse_json(text: str) -> Optional[List[Dict[str, Any]]]:
             cleaned = cleaned[:-3]
         cleaned = cleaned.strip()
 
-    start = cleaned.find("[")
-    end = cleaned.rfind("]")
+    # Attempt JSON parsing
+    parsed_json, json_err = _extract_json_object_or_array(cleaned)
+    if parsed_json is not None:
+        return _validate_recommendations_json(parsed_json)
 
-    # Strategy 1: Standard JSON array extraction
+    # Fallback to regex extraction as low-confidence recovery
+    regex_recs, regex_errs = _extract_regex_low_confidence(cleaned)
+    if regex_recs:
+        return ParseResult(
+            status="low_confidence",
+            recommendations=regex_recs,
+            errors=["JSON parsing failed; extracted using low-confidence regex fallback"] + regex_errs,
+        )
+
+    return ParseResult(status="invalid", errors=["Failed to parse JSON and regex fallback found no items", json_err or "Unknown error"])
+
+
+def parse_llm_response(raw_text: Optional[str]) -> List[Dict[str, Any]]:
+    """Legacy helper returning a list of dicts for backward compatibility with tests/services.
+
+    Returns:
+        List of dicts with 'rank', 'brand', and 'product' keys.
+    """
+    result = parse_llm_response_detailed(raw_text)
+    return [
+        {"rank": r.rank, "brand": r.brand, "product": r.product}
+        for r in result.recommendations
+    ]
+
+
+def _extract_json_object_or_array(text: str) -> Tuple[Optional[Any], Optional[str]]:
+    """Try to extract JSON object (wrapper with 'recommendations') or array."""
+    # Try direct parse
+    try:
+        data = json.loads(text)
+        return data, None
+    except json.JSONDecodeError:
+        pass
+
+    # Look for object wrapper {"recommendations": [...]}
+    obj_match = re.search(r'\{\s*"recommendations"\s*:\s*\[.*?\]\s*\}', text, re.DOTALL)
+    if obj_match:
+        try:
+            return json.loads(obj_match.group(0)), None
+        except json.JSONDecodeError:
+            pass
+
+    # Look for standalone JSON array [...]
+    start = text.find("[")
+    end = text.rfind("]")
     if start != -1 and end != -1 and end > start:
-        json_str = cleaned[start:end + 1]
+        snippet = text[start:end + 1]
         try:
-            data = json.loads(json_str)
-            if isinstance(data, list):
-                result = _extract_from_json_list(data)
-                if result:
-                    return result
-        except json.JSONDecodeError:
-            pass
+            return json.loads(snippet), None
+        except json.JSONDecodeError as e:
+            return None, f"JSON array decode error: {e}"
 
-    # Strategy 2: Truncated JSON recovery (common with Gemini)
-    if start != -1:
-        partial = cleaned[start:]
-        partial = partial.rstrip().rstrip(",")
-        if not partial.endswith("]"):
-            # Close any unclosed object
-            if partial.count("{") > partial.count("}"):
-                partial = partial.rstrip().rstrip(",")
-                if not partial.endswith("}"):
-                    partial += "}"
-            partial += "]"
-        try:
-            data = json.loads(partial)
-            if isinstance(data, list):
-                result = _extract_from_json_list(data)
-                if result:
-                    return result
-        except json.JSONDecodeError:
-            pass
-
-    # Strategy 3: Extract "brand" and "product" keys via regex from malformed JSON
-    brands = _recover_from_json_text(cleaned)
-    if brands:
-        return brands
-
-    return None
+    return None, "No valid JSON structure found"
 
 
-def _extract_from_json_list(data: list) -> Optional[List[Dict[str, Any]]]:
-    """Extract brand/product dicts from a parsed JSON list.
+def _validate_recommendations_json(data: Any) -> ParseResult:
+    """Strictly validate parsed JSON data against ranking and entity requirements."""
+    items: List[Any] = []
+    if isinstance(data, dict):
+        if "recommendations" in data and isinstance(data["recommendations"], list):
+            items = data["recommendations"]
+        else:
+            return ParseResult(status="invalid", errors=["JSON object missing 'recommendations' list"])
+    elif isinstance(data, list):
+        items = data
+    else:
+        return ParseResult(status="invalid", errors=["JSON root is neither list nor object"])
 
-    Args:
-        data: Parsed JSON list.
+    if not items:
+        return ParseResult(status="invalid", errors=["Empty recommendations list"])
 
-    Returns:
-        List of normalized dicts, or None if nothing valid found.
-    """
-    results = []
-    for item in data:
+    errors: List[str] = []
+    valid_recs: List[ParsedRecommendation] = []
+    seen_ranks: Set[int] = set()
+    has_duplicate_rank = False
+    has_invalid_rank = False
+    has_malformed_item = False
+
+    for idx, item in enumerate(items):
         if not isinstance(item, dict):
+            errors.append(f"Item #{idx + 1} is not an object")
+            has_malformed_item = True
             continue
 
-        rank_raw = item.get("rank")
-        brand_raw = item.get("brand", "")
-        product_raw = item.get("product", "")
+        raw_rank = item.get("rank")
+        raw_brand = item.get("brand")
+        raw_product = item.get("product")
 
-        # If only "brand" key exists (old format), use it as product too
-        if not product_raw and brand_raw:
-            product_raw = brand_raw
+        # Validate brand non-empty string
+        if not isinstance(raw_brand, str) or not raw_brand.strip():
+            errors.append(f"Item #{idx + 1} has empty or non-string brand")
+            has_malformed_item = True
+            continue
+        brand = raw_brand.strip()
 
-        if not isinstance(brand_raw, str):
-            brand_raw = str(brand_raw) if brand_raw else ""
-        if not isinstance(product_raw, str):
-            product_raw = str(product_raw) if product_raw else ""
+        # Validate product non-empty string
+        if not isinstance(raw_product, str) or not raw_product.strip():
+            errors.append(f"Item #{idx + 1} has empty or non-string product")
+            has_malformed_item = True
+            continue
+        product = raw_product.strip()
 
-        brand = brand_raw.strip()
-        product = product_raw.strip()
-
-        if not brand and not product:
+        # Validate rank is integer and strictly 1..5
+        if raw_rank is None or not isinstance(raw_rank, int) or isinstance(raw_rank, bool):
+            errors.append(f"Item #{idx + 1} ({brand}) has non-integer rank: {raw_rank}")
+            has_invalid_rank = True
             continue
 
-        # If brand is missing but product exists, try to extract brand
-        if not brand and product:
-            brand = _extract_brand_from_product(product)
+        if raw_rank < 1 or raw_rank > 5:
+            errors.append(f"Item #{idx + 1} ({brand}) has out-of-bounds rank {raw_rank} (must be 1..5)")
+            has_invalid_rank = True
+            continue
 
-        try:
-            rank = int(rank_raw) if rank_raw is not None else len(results) + 1
-        except (ValueError, TypeError):
-            rank = len(results) + 1
+        if raw_rank in seen_ranks:
+            errors.append(f"Duplicate rank {raw_rank} for brand '{brand}'")
+            has_duplicate_rank = True
+            continue
 
-        if 1 <= rank <= 10:
-            results.append({
-                "brand": brand,
-                "product": product,
-                "rank": rank,
-            })
+        seen_ranks.add(raw_rank)
+        valid_recs.append(ParsedRecommendation(rank=raw_rank, brand=brand, product=product))
 
-    return results if results else None
+    # Check completeness
+    expected_ranks = {1, 2, 3, 4, 5}
+    missing_ranks = expected_ranks - seen_ranks
 
+    # Sort by rank ascending
+    valid_recs.sort(key=lambda r: r.rank)
 
-def _recover_from_json_text(text: str) -> Optional[List[Dict[str, Any]]]:
-    """Last-resort: extract brand/product from malformed JSON using regex.
+    if has_duplicate_rank or has_invalid_rank or has_malformed_item or missing_ranks:
+        if valid_recs and not has_duplicate_rank and not has_invalid_rank and not has_malformed_item:
+            # Missing ranks only (partial response)
+            errors.append(f"Missing ranks: {sorted(list(missing_ranks))}")
+            return ParseResult(status="partial", recommendations=valid_recs, errors=errors)
+        else:
+            return ParseResult(status="invalid", recommendations=valid_recs, errors=errors)
 
-    Args:
-        text: Text that might contain partial JSON objects.
+    if len(valid_recs) == 5:
+        return ParseResult(status="valid", recommendations=valid_recs, errors=errors)
 
-    Returns:
-        List of extracted dicts, or None.
-    """
-    brand_matches = re.findall(r'"brand"\s*:\s*"([^"]+)"', text)
-    product_matches = re.findall(r'"product"\s*:\s*"([^"]+)"', text)
-    rank_matches = re.findall(r'"rank"\s*:\s*(\d+)', text)
-
-    if not brand_matches and not product_matches:
-        return None
-
-    results = []
-    max_len = max(len(brand_matches), len(product_matches))
-
-    for i in range(max_len):
-        brand = brand_matches[i].strip() if i < len(brand_matches) else ""
-        product = product_matches[i].strip() if i < len(product_matches) else ""
-        rank = int(rank_matches[i]) if i < len(rank_matches) else i + 1
-
-        if not brand and product:
-            brand = _extract_brand_from_product(product)
-        if not product and brand:
-            product = brand
-
-        if (brand or product) and 1 <= rank <= 10:
-            results.append({"brand": brand, "product": product, "rank": rank})
-
-    return results if results else None
+    return ParseResult(status="invalid", recommendations=valid_recs, errors=errors)
 
 
-def _extract_brands_regex(text: str) -> List[Dict[str, Any]]:
-    """Extract brands from unstructured text using regex patterns.
+def _extract_regex_low_confidence(text: str) -> Tuple[List[ParsedRecommendation], List[str]]:
+    """Extract recommendations from raw text using regex patterns as a low-confidence fallback."""
+    results: List[ParsedRecommendation] = []
+    errors: List[str] = []
+    seen_ranks: Set[int] = set()
 
-    Handles formats like:
-    - "1. BrandName ProductName - description"
-    - "1. **BrandName ProductName** - description"
-    - "### 1. BrandName"
-    - "- BrandName ProductName"
-
-    Args:
-        text: Unstructured LLM response text.
-
-    Returns:
-        List of brand/product dicts.
-    """
-    results: List[Dict[str, Any]] = []
-
-    # Pattern 1: Numbered list "1. Brand Product" or "1. **Brand Product**"
-    pattern1 = re.findall(
+    # Pattern: "1. Brand Product" or "1) Brand Product"
+    pattern = re.findall(
         r'^\s*(\d+)[.)]\s*\*{0,2}\s*([A-Za-z0-9]' + BRAND_CHARS + r'{2,60})',
         text,
         re.MULTILINE,
     )
-    for rank_str, raw_name in pattern1:
+
+    for rank_str, raw_name in pattern:
+        try:
+            rank = int(rank_str)
+        except ValueError:
+            continue
+
+        if rank < 1 or rank > 5:
+            errors.append(f"Regex match ignored out-of-bounds rank {rank}")
+            continue
+
+        if rank in seen_ranks:
+            errors.append(f"Regex match duplicate rank {rank}")
+            continue
+
         cleaned = _clean_brand_name(raw_name)
-        if _is_valid_brand(cleaned):
-            brand = _extract_brand_from_product(cleaned)
-            results.append({
-                "brand": brand,
-                "product": cleaned,
-                "rank": int(rank_str),
-            })
+        if len(cleaned) < 2:
+            continue
 
-    # Pattern 2: Bold mentions **BrandName**
-    if not results:
-        bold = re.findall(
-            r'\*\*([A-Za-z0-9]' + BRAND_CHARS + r'{2,60})\*\*',
-            text,
-        )
-        seen: set = set()
-        for raw_name in bold:
-            cleaned = _clean_brand_name(raw_name)
-            key = cleaned.lower()
-            if key not in seen and _is_valid_brand(cleaned):
-                seen.add(key)
-                brand = _extract_brand_from_product(cleaned)
-                results.append({
-                    "brand": brand,
-                    "product": cleaned,
-                    "rank": len(seen),
-                })
-            if len(seen) >= 5:
-                break
+        brand = _extract_brand_from_product(cleaned)
+        seen_ranks.add(rank)
+        results.append(ParsedRecommendation(rank=rank, brand=brand, product=cleaned))
 
-    # Pattern 3: Markdown headings "### BrandName"
-    if not results:
-        headings = re.findall(
-            r'^#{1,4}\s*\d*\.?\s*\*{0,2}([A-Za-z0-9]' + BRAND_CHARS + r'{2,60})',
-            text,
-            re.MULTILINE,
-        )
-        for i, raw_name in enumerate(headings[:5], 1):
-            cleaned = _clean_brand_name(raw_name)
-            if _is_valid_brand(cleaned):
-                brand = _extract_brand_from_product(cleaned)
-                results.append({"brand": brand, "product": cleaned, "rank": i})
-
-    # Pattern 4: Bullet list "- BrandName"
-    if not results:
-        bullets = re.findall(
-            r'^\s*[-\u2022]\s+\*{0,2}([A-Za-z0-9]' + BRAND_CHARS + r'{2,60})',
-            text,
-            re.MULTILINE,
-        )
-        for i, raw_name in enumerate(bullets[:5], 1):
-            cleaned = _clean_brand_name(raw_name)
-            if _is_valid_brand(cleaned):
-                brand = _extract_brand_from_product(cleaned)
-                results.append({"brand": brand, "product": cleaned, "rank": i})
-
-    return results
+    results.sort(key=lambda r: r.rank)
+    return results, errors
 
 
 def _extract_brand_from_product(full_name: str) -> str:
-    """Heuristic: extract the brand/company name from a full product name.
-
-    Splits on common patterns. For "Optimum Nutrition Gold Standard 100% Whey",
-    returns "Optimum Nutrition". For single-word names like "Apple", returns "Apple".
-
-    Args:
-        full_name: The full product/brand name string.
-
-    Returns:
-        The extracted brand name.
-    """
+    """Heuristic helper to extract company name from product string."""
     if not full_name:
         return ""
 
@@ -296,60 +257,27 @@ def _extract_brand_from_product(full_name: str) -> str:
     if len(words) <= 2:
         return full_name.strip()
 
-    # Common brand patterns: first 1-3 words are typically the brand
-    # Check if the third word looks like a product descriptor
     product_indicators = {
         "gold", "standard", "pro", "max", "ultra", "plus", "edge",
         "impact", "nitro", "iso", "100%", "whey", "protein", "tech",
         "series", "edition", "model", "version", "lite", "air",
-        "syntha", "syntha-6",
+        "syntha", "syntha-6", "running", "shoes", "shoe", "headphone", "headphones",
+        "iphone", "ipad", "macbook", "galaxy", "pixel", "thinkpad", "surface",
+        "playstation", "xbox", "bravia", "eos", "lumix"
     }
 
-    # If word 2 (0-indexed) is a product indicator, brand is first 1 word
     if len(words) >= 3 and words[1].lower() in product_indicators:
         return words[0]
 
-    # If word 3 (0-indexed) is a product indicator, brand is first 2 words
     if len(words) >= 3 and words[2].lower() in product_indicators:
         return " ".join(words[:2])
 
-    # Default: first two words are the brand
     return " ".join(words[:2])
 
 
 def _clean_brand_name(raw: str) -> str:
-    """Clean a raw brand match without destroying meaningful characters.
-
-    Args:
-        raw: Raw regex match string.
-
-    Returns:
-        Cleaned brand name.
-    """
-    cleaned = raw.strip().rstrip("*").strip()
-
-    # Remove trailing descriptions after delimiters
-    cleaned = re.split(r'\s+[-\u2013\u2014]\s+|\s*:\s+', cleaned, maxsplit=1)[0].strip()
-
-    # Remove trailing description words
-    desc_starters = re.compile(
-        r'\s+(?:is|are|has|was|were|offers|provides|features|comes|includes|contains)\s',
-        re.IGNORECASE,
-    )
-    m = desc_starters.search(cleaned)
-    if m:
-        cleaned = cleaned[:m.start()].strip()
-
+    """Clean raw regex string."""
+    cleaned = raw.strip().strip("*_#:-")
+    # Split on description separators
+    cleaned = re.split(r'\s+-\s+|\s*:\s+', cleaned, maxsplit=1)[0].strip()
     return cleaned
-
-
-def _is_valid_brand(name: str) -> bool:
-    """Check if a cleaned string looks like a plausible brand name.
-
-    Args:
-        name: Cleaned brand name string.
-
-    Returns:
-        True if the name is between 3 and 80 characters.
-    """
-    return 3 <= len(name) <= 80

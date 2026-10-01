@@ -1,20 +1,35 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import InsightsPanel from "../components/InsightsPanel";
+import { TypedInsight } from "../lib/types";
 
 describe("InsightsPanel Component", () => {
-  it("renders positive, negative, and informational insights", () => {
-    const insights = [
-      "The top performing brand is BrandX with a total score of 45.0.",
-      "BrandY does not appear in top Google results for this query.",
-      "You outscore your nearest competitor by 12.0 points.",
+  it("renders typed insights with titles and messages", () => {
+    const mockInsights: TypedInsight[] = [
+      {
+        type: "positive",
+        title: "Category Leader",
+        message: "Nike achieved the highest AI Visibility Score of 90.0/100 across evaluated models.",
+        evidence: { leader: "Nike", score: 90.0 },
+      },
+      {
+        type: "warning",
+        title: "Search Corroboration Gap",
+        message: "Nike was recommended by AI models but not observed in top organic Google results.",
+        evidence: { brand: "Nike" },
+      },
     ];
 
-    render(<InsightsPanel insights={insights} />);
+    render(<InsightsPanel insights={mockInsights} />);
 
-    expect(screen.getByText("Actionable Insights")).toBeInTheDocument();
-    expect(screen.getByText(/The top performing brand is BrandX/)).toBeInTheDocument();
-    expect(screen.getByText(/BrandY does not appear in top Google results/)).toBeInTheDocument();
-    expect(screen.getByText(/You outscore your nearest competitor/)).toBeInTheDocument();
+    expect(screen.getByText("Actionable Diagnostic Insights")).toBeInTheDocument();
+    expect(screen.getByText("Category Leader")).toBeInTheDocument();
+    expect(screen.getByText(/highest AI Visibility Score of 90.0\/100/)).toBeInTheDocument();
+    expect(screen.getByText("Search Corroboration Gap")).toBeInTheDocument();
+  });
+
+  it("returns null when insights list is empty", () => {
+    const { container } = render(<InsightsPanel insights={[]} />);
+    expect(container.firstChild).toBeNull();
   });
 });

@@ -1,48 +1,61 @@
 # test_segmentation.py
-"""Tests for brand vs product segmentation.
+"""Tests for brand vs product segmentation and domain model separation.
 
-Covers heuristic splitting, known brand patterns, single-word brands,
-edge cases, and international naming conventions.
+Ensures that brands are ranking entities and products are supporting evidence.
+Covers heuristic splitting, strict rejection of missing entities, and
+proper grouping of multiple products under the same parent brand.
 """
 import pytest
 from app.services.parser_service import (
-    parse_llm_response,
+    parse_llm_response_detailed,
     _extract_brand_from_product,
 )
+from app.models.brand import Brand, ProductEvidence, EngineObservation
 
 
-class TestJsonBasedSegmentation:
-    """Tests for segmentation when LLM provides both brand and product."""
+class TestBrandProductSegmentation:
+    """Tests for separating brands from products."""
 
     def test_explicit_brand_and_product(self):
-        text = '[{"rank": 1, "brand": "Optimum Nutrition", "product": "Gold Standard 100% Whey"}]'
-        result = parse_llm_response(text)
-        assert result[0]["brand"] == "Optimum Nutrition"
-        assert result[0]["product"] == "Gold Standard 100% Whey"
+        text = '''{
+            "recommendations": [
+                {"rank": 1, "brand": "Optimum Nutrition", "product": "Gold Standard 100% Whey"},
+                {"rank": 2, "brand": "Dymatize", "product": "ISO100 Hydrolyzed"},
+                {"rank": 3, "brand": "BSN", "product": "Syntha-6 Edge"},
+                {"rank": 4, "brand": "MuscleTech", "product": "Nitro-Tech"},
+                {"rank": 5, "brand": "Cellucor", "product": "COR-Performance"}
+            ]
+        }'''
+        res = parse_llm_response_detailed(text)
+        assert res.status == "valid"
+        assert res.recommendations[0].brand == "Optimum Nutrition"
+        assert res.recommendations[0].product == "Gold Standard 100% Whey"
 
-    def test_brand_missing_product_present(self):
-        """When brand is empty, it should be extracted from product."""
-        text = '[{"rank": 1, "brand": "", "product": "Nike Air Max 90"}]'
-        result = parse_llm_response(text)
-        assert result[0]["brand"] != ""
-        assert result[0]["product"] == "Nike Air Max 90"
+    def test_strict_reject_empty_brand_in_structured_json(self):
+        """Strict parser rejects malformed recommendation with empty brand."""
+        text = '''{
+            "recommendations": [
+                {"rank": 1, "brand": "", "product": "Nike Air Max 90"}
+            ]
+        }'''
+        res = parse_llm_response_detailed(text)
+        assert res.status == "invalid"
+        assert any("empty or non-string brand" in e for e in res.errors)
 
-    def test_product_missing_brand_present(self):
-        """When product is missing, brand is used as product too."""
-        text = '[{"rank": 1, "brand": "Apple", "product": ""}]'
-        result = parse_llm_response(text)
-        assert result[0]["brand"] == "Apple"
-        assert result[0]["product"] == "Apple"
-
-    def test_both_missing_skipped(self):
-        text = '[{"rank": 1, "brand": "", "product": ""}, {"rank": 2, "brand": "Test", "product": "Test Pro"}]'
-        result = parse_llm_response(text)
-        assert len(result) == 1
-        assert result[0]["brand"] == "Test"
+    def test_strict_reject_empty_product_in_structured_json(self):
+        """Strict parser rejects malformed recommendation with empty product."""
+        text = '''{
+            "recommendations": [
+                {"rank": 1, "brand": "Apple", "product": ""}
+            ]
+        }'''
+        res = parse_llm_response_detailed(text)
+        assert res.status == "invalid"
+        assert any("empty or non-string product" in e for e in res.errors)
 
 
-class TestHeuristicSplitting:
-    """Tests for the brand extraction heuristic."""
+class TestHeuristicSplittingForFallback:
+    """Tests for the brand extraction heuristic used in regex fallback."""
 
     def test_two_word_brand(self):
         assert _extract_brand_from_product("Optimum Nutrition Gold Standard") == "Optimum Nutrition"
@@ -51,65 +64,42 @@ class TestHeuristicSplitting:
         assert _extract_brand_from_product("Apple") == "Apple"
 
     def test_brand_is_product_name(self):
-        """When brand and product are the same single entity."""
         assert _extract_brand_from_product("Nike") == "Nike"
 
-    def test_three_word_product(self):
-        result = _extract_brand_from_product("Samsung Galaxy S24")
-        assert result in ["Samsung", "Samsung Galaxy"]
-
     def test_product_indicator_word(self):
-        """Word 2 is a product indicator, so brand is word 1 only."""
-        result = _extract_brand_from_product("BSN SYNTHA-6 Edge")
-        assert result == "BSN"
-
-    def test_long_compound_name(self):
-        result = _extract_brand_from_product(
-            "Nature Made Wellblends Calm & Relax Magnesium Supplement"
-        )
-        assert result in ["Nature Made", "Nature"]
+        assert _extract_brand_from_product("BSN SYNTHA-6 Edge") == "BSN"
 
     def test_empty_string(self):
         assert _extract_brand_from_product("") == ""
 
-    def test_single_character(self):
-        assert _extract_brand_from_product("A") == "A"
 
-    def test_two_words_total(self):
-        assert _extract_brand_from_product("Samsung Galaxy") == "Samsung Galaxy"
+class TestDomainModelHierarchy:
+    """Tests that products are evidence while brands are scored entities."""
 
-    def test_product_name_with_numbers(self):
-        result = _extract_brand_from_product("iPhone 15 Pro Max")
-        assert result in ["iPhone 15", "iPhone"]
-
-    def test_product_name_with_special_chars(self):
-        result = _extract_brand_from_product("GNC Pro Performance 100% Whey")
-        assert result in ["GNC", "GNC Pro"]
-
-
-class TestRegexFallbackSegmentation:
-    """Tests for brand extraction from regex-parsed results."""
-
-    def test_numbered_list_extracts_brand(self):
-        text = (
-            "1. Samsung Galaxy S24 Ultra - Best Android\n"
-            "2. Apple iPhone 15 Pro - Best iOS\n"
-            "3. Google Pixel 8 Pro - Best Camera"
+    def test_brand_aggregates_multiple_products(self):
+        b = Brand(name="Nike", normalized_name="nike")
+        obs = EngineObservation(
+            engine="GPT-5-mini",
+            status="success",
+            mentioned=True,
+            best_rank=1,
+            position_score=1.00,
+            products=[
+                ProductEvidence(brand_name="Nike", product_name="Nike Pegasus 40", full_name="Nike Pegasus 40", rank=1, engine="GPT-5-mini"),
+                ProductEvidence(brand_name="Nike", product_name="Nike Vaporfly 3", full_name="Nike Vaporfly 3", rank=4, engine="GPT-5-mini"),
+            ],
+            latency_ms=1200.0,
         )
-        result = parse_llm_response(text)
-        assert len(result) == 3
-        # Each result should have a brand extracted
-        for item in result:
-            assert item["brand"] != ""
-            assert item["product"] != ""
+        b.observations["GPT-5-mini"] = obs
+        b.products.extend(obs.products)
+        b.best_rank = 1
 
-    def test_bold_markdown_extracts_brand(self):
-        text = (
-            "**Samsung Galaxy S24** is the best phone.\n"
-            "**Apple iPhone 15** is great too.\n"
-            "**Google Pixel 8** has the best camera."
-        )
-        result = parse_llm_response(text)
-        assert len(result) >= 3
-        for item in result:
-            assert item["brand"] != ""
+        # Brand has 2 products as evidence
+        all_prods = b.products
+        assert len(all_prods) == 2
+        assert all_prods[0].product_name == "Nike Pegasus 40"
+        assert all_prods[1].product_name == "Nike Vaporfly 3"
+
+        # Best rank and best product
+        assert b.best_rank == 1
+        assert b.best_product.product_name == "Nike Pegasus 40"

@@ -1,57 +1,60 @@
 # fuzzy.py
 import re
 import logging
+from typing import Optional, List, Tuple
 from thefuzz import fuzz
+
+from app.utils.entity_resolution import (
+    normalize_brand_name,
+    resolve_brand_entity,
+    extract_domain,
+    KNOWN_ALIASES,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def is_same_brand(b1: str, b2: str, threshold: int = 85) -> bool:
-    """Check if two brand names refer to the same brand using fuzzy matching.
+def is_same_brand(b1: Optional[str], b2: Optional[str], threshold: int = 88) -> bool:
+    """Check if two brand names refer to the same brand entity.
 
-    Uses token_set_ratio for order-independent comparison and includes
-    a digit check to prevent merging distinct product versions.
-
-    Args:
-        b1: First brand name.
-        b2: Second brand name.
-        threshold: Minimum similarity score (0-100).
-
-    Returns:
-        True if the names are considered the same brand.
+    Uses normalized entity resolution with high confidence priority:
+    1. Exact normalized match
+    2. Explicit alias match
+    3. Strong deterministic containment
+    4. Strict fuzzy match
     """
     if not b1 or not b2:
         return False
 
-    b1_clean = b1.lower().strip()
-    b2_clean = b2.lower().strip()
+    n1 = normalize_brand_name(b1)
+    n2 = normalize_brand_name(b2)
 
-    if b1_clean == b2_clean:
-        return True
-
-    # Anti-merge: if both contain numbers, they must share at least one
-    digits1 = set(re.findall(r'\d+', b1_clean))
-    digits2 = set(re.findall(r'\d+', b2_clean))
-    if digits1 and digits2 and not (digits1 & digits2):
+    if not n1 or not n2:
         return False
 
-    score = fuzz.token_set_ratio(b1_clean, b2_clean)
+    if n1 == n2:
+        return True
+
+    # Check explicit alias dictionary
+    if KNOWN_ALIASES.get(n1) == n2 or KNOWN_ALIASES.get(n2) == n1:
+        return True
+
+    # Word-boundary containment
+    w1 = set(n1.split())
+    w2 = set(n2.split())
+    if len(w1) > 0 and len(w2) > 0:
+        if w1 == w2 or (w1.issubset(w2) and len(w1) >= 2) or (w2.issubset(w1) and len(w2) >= 2):
+            return True
+
+    score = fuzz.token_sort_ratio(n1, n2)
     return score >= threshold
 
 
-def is_same_product(p1: str, p2: str, threshold: int = 80) -> bool:
+def is_same_product(p1: Optional[str], p2: Optional[str], threshold: int = 80) -> bool:
     """Check if two product names refer to the same product.
 
-    Uses token_sort_ratio for flexible ordering and includes
-    a digit check for version/model number differentiation.
-
-    Args:
-        p1: First product name.
-        p2: Second product name.
-        threshold: Minimum similarity score (0-100).
-
-    Returns:
-        True if the names are considered the same product.
+    Uses token_sort_ratio for flexible ordering and checks version
+    numbers to prevent merging distinct product models (e.g. iPhone 14 vs 15).
     """
     if not p1 or not p2:
         return False
@@ -62,7 +65,7 @@ def is_same_product(p1: str, p2: str, threshold: int = 80) -> bool:
     if p1_clean == p2_clean:
         return True
 
-    # Anti-merge: different version/model numbers should not match
+    # Distinct version/model numbers should not be merged
     digits1 = set(re.findall(r'\d+', p1_clean))
     digits2 = set(re.findall(r'\d+', p2_clean))
     if digits1 and digits2 and not (digits1 & digits2):
@@ -72,44 +75,40 @@ def is_same_product(p1: str, p2: str, threshold: int = 80) -> bool:
     return score >= threshold
 
 
-def fuzzy_find_in_text(brand_name: str, text: str, threshold: int = 80) -> bool:
-    """Check if a brand name appears (fuzzily) anywhere in a block of text.
+def fuzzy_find_in_text(brand_name: Optional[str], text: Optional[str], threshold: int = 85) -> bool:
+    """Check if a brand name appears anywhere in a block of text.
 
-    Uses a sliding-window approach over n-grams of the text for robust matching.
-
-    Args:
-        brand_name: The brand to look for.
-        text: The text block to search in (e.g., Google snippet).
-        threshold: Minimum similarity to count as a match.
-
-    Returns:
-        True if any n-gram window in the text fuzzily matches the brand.
+    Evaluated independently on single text snippets (not concatenated blobs).
     """
     if not brand_name or not text:
         return False
 
-    brand_lower = brand_name.lower().strip()
-    text_lower = text.lower()
-
-    # Fast path: exact substring match
-    if brand_lower in text_lower:
-        return True
-
-    # Check if most significant brand words appear in the text
-    brand_words = [w for w in brand_lower.split() if len(w) > 2]
-    if not brand_words:
+    norm_brand = normalize_brand_name(brand_name)
+    if not norm_brand:
         return False
 
-    matches = sum(1 for w in brand_words if w in text_lower)
-    if len(brand_words) > 0 and matches / len(brand_words) >= 0.6:
+    text_lower = text.lower()
+
+    # Word boundary regex search for the brand (prevents 'Son' from matching 'Sony')
+    escaped_brand = re.escape(norm_brand)
+    if re.search(r'\b' + escaped_brand + r'\b', text_lower):
         return True
 
-    # Sliding window fuzzy match
-    text_words = text_lower.split()
-    window_size = len(brand_lower.split())
-    for i in range(len(text_words) - window_size + 1):
-        window = " ".join(text_words[i:i + window_size])
-        if fuzz.token_set_ratio(brand_lower, window) >= threshold:
+    # For very short brands (< 4 chars), exact word-boundary regex match above is sufficient
+    # to avoid false positives like 'Son' matching 'Sony'
+    if len(norm_brand) < 4:
+        return False
+
+    brand_tokens = norm_brand.split()
+    text_tokens = re.sub(r'[^a-z0-9\s]', ' ', text_lower).split()
+    window_size = len(brand_tokens)
+
+    if window_size == 0 or len(text_tokens) < window_size:
+        return False
+
+    for i in range(len(text_tokens) - window_size + 1):
+        window = " ".join(text_tokens[i:i + window_size])
+        if fuzz.token_sort_ratio(norm_brand, window) >= threshold:
             return True
 
     return False

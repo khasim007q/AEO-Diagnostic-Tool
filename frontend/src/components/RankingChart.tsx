@@ -1,4 +1,5 @@
-import { BrandResult } from '../lib/types';
+// RankingChart.tsx
+import { BrandResult, EngineSummary } from "../lib/types";
 import {
   BarChart,
   Bar,
@@ -7,72 +8,106 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
-  ResponsiveContainer
-} from 'recharts';
+  ResponsiveContainer,
+} from "recharts";
 
 interface RankingChartProps {
   brands: BrandResult[];
+  engineSummaries: EngineSummary[];
 }
 
-const RANK_POINTS: Record<number, number> = { 1: 10, 2: 6, 3: 4, 4: 2, 5: 1 };
+const ENGINE_PALETTE = [
+  "#10a37f", // Green
+  "#d97757", // Terracotta
+  "#1a73e8", // Blue
+  "#8b5cf6", // Purple
+  "#f59e0b", // Amber
+];
 
-export default function RankingChart({ brands }: RankingChartProps) {
-  const getEngineScore = (brand: BrandResult, engine: string): number => {
-    let score = 0;
-    brand.products.forEach(p => {
-      const match = Object.entries(p.ranks).find(([k]) => k.toLowerCase().includes(engine.toLowerCase()));
-      if (match) {
-        score += RANK_POINTS[match[1]] || 0;
+export default function RankingChart({
+  brands,
+  engineSummaries,
+}: RankingChartProps) {
+  const engineNames = engineSummaries.map((s) => s.engine);
+
+  // Take top 8 brands by AI Visibility Score
+  const chartData = brands.slice(0, 8).map((brand) => {
+    const item: Record<string, string | number> = {
+      name: brand.name,
+      Overall: brand.ai_visibility_score,
+    };
+
+    engineNames.forEach((engine) => {
+      const obs = brand.observations[engine];
+      if (obs && obs.status === "success" && obs.mentioned) {
+        // Use backend position_score * 100 directly (0 to 100)
+        item[engine] = Math.round(obs.position_score * 100);
+      } else {
+        item[engine] = 0;
       }
     });
-    return score;
-  };
 
-  const data = brands.slice(0, 8).map(brand => {
-    return {
-      name: brand.name,
-      'GPT': getEngineScore(brand, 'gpt'),
-      'Claude': getEngineScore(brand, 'claude'),
-      'Gemini': getEngineScore(brand, 'gemini'),
-    };
+    return item;
   });
 
   return (
-    <div className="w-full h-[400px] p-6 bg-card rounded-xl border shadow-sm flex flex-col">
-      <h3 className="text-lg font-semibold mb-6">Cross-Engine Score Comparison</h3>
+    <div className="w-full h-[420px] p-6 bg-card rounded-2xl border shadow-sm flex flex-col">
+      <div className="mb-4">
+        <h3 className="text-lg font-bold text-foreground">Cross-Engine Visibility Benchmark</h3>
+        <p className="text-xs text-muted-foreground">
+          Deterministic position score (0 to 100) per engine based on highest observed brand rank.
+        </p>
+      </div>
+
       <div className="flex-1 w-full min-h-0">
         <ResponsiveContainer width="100%" height="100%">
           <BarChart
-            data={data}
-            margin={{ top: 20, right: 30, left: 20, bottom: 5 }}
+            data={chartData}
+            margin={{ top: 10, right: 20, left: 0, bottom: 20 }}
           >
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-            <XAxis 
-              dataKey="name" 
+            <CartesianGrid
+              strokeDasharray="3 3"
+              stroke="hsl(var(--border))"
+              vertical={false}
+            />
+            <XAxis
+              dataKey="name"
               stroke="hsl(var(--muted-foreground))"
               fontSize={12}
               tickLine={false}
               axisLine={false}
+              interval={0}
+              angle={-20}
+              textAnchor="end"
             />
-            <YAxis 
+            <YAxis
+              domain={[0, 100]}
               stroke="hsl(var(--muted-foreground))"
               fontSize={12}
               tickLine={false}
               axisLine={false}
+              unit="%"
             />
-            <Tooltip 
-              cursor={{ fill: 'hsl(var(--muted))', opacity: 0.2 }}
-              contentStyle={{ 
-                backgroundColor: 'hsl(var(--popover))',
-                border: '1px solid hsl(var(--border))',
-                borderRadius: '8px',
-                color: 'hsl(var(--popover-foreground))'
+            <Tooltip
+              cursor={{ fill: "hsl(var(--muted))", opacity: 0.2 }}
+              formatter={(value: unknown, name: unknown) => [`${value}%`, String(name)]}
+              contentStyle={{
+                backgroundColor: "hsl(var(--popover))",
+                border: "1px solid hsl(var(--border))",
+                borderRadius: "8px",
+                color: "hsl(var(--popover-foreground))",
               }}
             />
-            <Legend wrapperStyle={{ paddingTop: '20px' }} />
-            <Bar dataKey="GPT" fill="#10a37f" radius={[4, 4, 0, 0]} maxBarSize={40} />
-            <Bar dataKey="Claude" fill="#d97757" radius={[4, 4, 0, 0]} maxBarSize={40} />
-            <Bar dataKey="Gemini" fill="#1a73e8" radius={[4, 4, 0, 0]} maxBarSize={40} />
+            <Legend wrapperStyle={{ paddingTop: "15px" }} />
+            {engineNames.map((engine, idx) => (
+              <Bar
+                key={engine}
+                dataKey={engine}
+                fill={ENGINE_PALETTE[idx % ENGINE_PALETTE.length]}
+                radius={[4, 4, 0, 0]}
+                maxBarSize={30}
+              />
+            ))}
           </BarChart>
         </ResponsiveContainer>
       </div>

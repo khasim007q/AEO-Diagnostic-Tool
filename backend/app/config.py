@@ -1,27 +1,19 @@
 # config.py
 import json
 import logging
-from typing import List
+from typing import List, Union
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables.
-
-    Required:
-        OPENROUTER_API_KEY: API key for OpenRouter LLM access.
-        SERPAPI_KEY: API key for SerpApi Google search.
-
-    Optional:
-        CORS_ORIGINS: List of allowed CORS origins (JSON array string).
-        DEBUG: Enable debug logging.
-    """
+    """Application settings loaded from environment variables."""
 
     OPENROUTER_API_KEY: str = ""
     SERPAPI_KEY: str = ""
-    CORS_ORIGINS: List[str] = ["http://localhost:5173"]
+    CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     DEBUG: bool = False
 
     model_config = SettingsConfigDict(
@@ -30,21 +22,18 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
-    def parse_cors_origins(cls, value: str) -> List[str]:
-        """Parse CORS origins if passed as a JSON string.
-
-        Args:
-            value: Either a JSON array string or a single origin URL.
-
-        Returns:
-            List of origin URLs.
-        """
+    def parse_cors_origins(cls, value: Union[str, List[str]]) -> List[str]:
+        """Parse CORS origins if passed as a JSON string or comma-separated list."""
         if isinstance(value, str):
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return [value]
+            value = value.strip()
+            if value.startswith("[") and value.endswith("]"):
+                try:
+                    return json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
 

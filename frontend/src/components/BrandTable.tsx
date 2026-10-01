@@ -1,14 +1,20 @@
-import React, { useState } from 'react';
-import { BrandResult } from '../lib/types';
-import { ChevronDown, ChevronRight, CheckCircle2, XCircle } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+// BrandTable.tsx
+import React, { useState } from "react";
+import { BrandResult, EngineSummary } from "../lib/types";
+import { ChevronDown, ChevronRight, Package, ShieldCheck } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
 
 interface BrandTableProps {
   brands: BrandResult[];
-  yourBrand: BrandResult | null;
+  targetBrand?: BrandResult | null;
+  engineSummaries: EngineSummary[];
 }
 
-export default function BrandTable({ brands, yourBrand }: BrandTableProps) {
+export default function BrandTable({
+  brands,
+  targetBrand,
+  engineSummaries,
+}: BrandTableProps) {
   const [expandedBrands, setExpandedBrands] = useState<Set<string>>(new Set());
 
   const toggleBrand = (brandName: string) => {
@@ -21,113 +27,169 @@ export default function BrandTable({ brands, yourBrand }: BrandTableProps) {
     setExpandedBrands(next);
   };
 
-  const isYourBrand = (brandName: string) => {
-    return yourBrand?.name.toLowerCase() === brandName.toLowerCase();
+  const isTargetBrand = (brandName: string) => {
+    return targetBrand?.name.toLowerCase() === brandName.toLowerCase();
   };
 
-  const getRankDisplay = (ranks: Record<string, number>, engine: string): string => {
-    const match = Object.entries(ranks).find(([k]) => k.toLowerCase().includes(engine.toLowerCase()));
-    return match ? `#${match[1]}` : '-';
-  };
+  const engineNames = engineSummaries.map((s) => s.engine);
 
   return (
-    <div className="w-full rounded-md border bg-card overflow-hidden">
+    <div className="w-full rounded-2xl border bg-card overflow-hidden shadow-sm">
+      <div className="p-4 sm:p-6 border-b flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+        <div>
+          <h3 className="text-lg font-bold text-foreground">Brand Ranking Hierarchy</h3>
+          <p className="text-xs text-muted-foreground">
+            Brands are evaluated by their best rank per successful engine. Expand any brand to inspect returned product evidence.
+          </p>
+        </div>
+        <div className="text-xs text-muted-foreground font-medium">
+          {brands.length} brand{brands.length === 1 ? "" : "s"} indexed across {engineSummaries.length} engines
+        </div>
+      </div>
+
       <div className="overflow-x-auto">
         <table className="w-full text-sm text-left">
-          <thead className="bg-muted/50 text-muted-foreground uppercase text-xs">
+          <thead className="bg-muted/50 text-muted-foreground uppercase text-xs border-b">
             <tr>
               <th className="px-4 py-3 font-medium w-10"></th>
-              <th className="px-4 py-3 font-medium">Brand / Product</th>
-              <th className="px-4 py-3 font-medium text-right">Total Score</th>
-              <th className="px-4 py-3 font-medium text-right">Consensus</th>
-              <th className="px-4 py-3 font-medium text-center">Web Validated</th>
+              <th className="px-4 py-3 font-medium">Brand Entity</th>
+              <th className="px-4 py-3 font-medium text-right">Visibility Score</th>
+              <th className="px-4 py-3 font-medium text-right">Coverage</th>
+              {engineNames.map((engine) => (
+                <th key={engine} className="px-4 py-3 font-medium text-center">
+                  {engine}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
-            {brands.map((brand) => (
-              <React.Fragment key={brand.name}>
-                <tr 
-                  className={`group cursor-pointer hover:bg-muted/50 transition-colors ${
-                    isYourBrand(brand.name) ? 'bg-primary/5' : ''
-                  }`}
-                  onClick={() => toggleBrand(brand.name)}
-                >
-                  <td className="px-4 py-4 w-10 text-muted-foreground">
-                    {expandedBrands.has(brand.name) ? (
-                      <ChevronDown className="h-4 w-4" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4" />
-                    )}
-                  </td>
-                  <td className="px-4 py-4 font-semibold text-foreground">
-                    <div className="flex items-center gap-2">
-                      {brand.name}
-                      {isYourBrand(brand.name) && (
-                        <span className="px-2 py-0.5 rounded-full bg-primary/20 text-primary text-xs font-normal">
-                          Your Brand
-                        </span>
+            {brands.map((brand) => {
+              const isTarget = isTargetBrand(brand.name);
+              const isExpanded = expandedBrands.has(brand.name);
+              return (
+                <React.Fragment key={brand.name}>
+                  <tr
+                    className={`group cursor-pointer hover:bg-muted/50 transition-colors ${
+                      isTarget ? "bg-primary/5 font-medium" : ""
+                    }`}
+                    onClick={() => toggleBrand(brand.name)}
+                  >
+                    <td className="px-4 py-4 w-10 text-muted-foreground">
+                      {isExpanded ? (
+                        <ChevronDown className="h-4 w-4" />
+                      ) : (
+                        <ChevronRight className="h-4 w-4" />
                       )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-4 text-right font-medium">{brand.total_score}</td>
-                  <td className="px-4 py-4 text-right">{brand.consensus_pct}%</td>
-                  <td className="px-4 py-4 text-center">
-                    <div className="flex justify-center">
-                      <span className="text-xs px-2 py-1 bg-muted rounded-md border">
-                        {brand.llm_coverage.length} / 3 LLMs
-                      </span>
-                    </div>
-                  </td>
-                </tr>
-                <AnimatePresence>
-                  {expandedBrands.has(brand.name) && (
-                    <motion.tr
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: "auto" }}
-                      exit={{ opacity: 0, height: 0 }}
-                      className="bg-muted/10"
-                    >
-                      <td colSpan={5} className="p-0">
-                        <div className="px-12 py-3 border-b">
-                          <table className="w-full text-xs">
-                            <thead>
-                              <tr className="text-muted-foreground">
-                                <th className="py-2 text-left font-medium">Product</th>
-                                <th className="py-2 text-right font-medium">Score</th>
-                                <th className="py-2 text-right font-medium">GPT Rank</th>
-                                <th className="py-2 text-right font-medium">Claude Rank</th>
-                                <th className="py-2 text-right font-medium">Gemini Rank</th>
-                                <th className="py-2 text-center font-medium">Web</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {brand.products.map((product, idx) => (
-                                <tr key={idx} className="border-t border-border/50">
-                                  <td className="py-2 text-foreground font-medium">{product.product_name}</td>
-                                  <td className="py-2 text-right font-medium">{product.score}</td>
-                                  <td className="py-2 text-right text-muted-foreground">{getRankDisplay(product.ranks, 'gpt')}</td>
-                                  <td className="py-2 text-right text-muted-foreground">{getRankDisplay(product.ranks, 'claude')}</td>
-                                  <td className="py-2 text-right text-muted-foreground">{getRankDisplay(product.ranks, 'gemini')}</td>
-                                  <td className="py-2 text-center">
-                                    <div className="flex justify-center">
-                                      {product.web_validated ? (
-                                        <CheckCircle2 className="h-4 w-4 text-green-500" />
-                                      ) : (
-                                        <XCircle className="h-4 w-4 text-muted-foreground/30" />
-                                      )}
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </td>
-                    </motion.tr>
-                  )}
-                </AnimatePresence>
-              </React.Fragment>
-            ))}
+                    </td>
+                    <td className="px-4 py-4 text-foreground">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold">{brand.name}</span>
+                        {isTarget && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/20 text-primary text-xs font-semibold">
+                            <ShieldCheck className="w-3 h-3" />
+                            Target
+                          </span>
+                        )}
+                        {brand.products.length > 0 && (
+                          <span className="text-[11px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                            {brand.products.length} product{brand.products.length === 1 ? "" : "s"}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-4 text-right font-bold text-foreground">
+                      {brand.ai_visibility_score.toFixed(1)} / 100
+                    </td>
+                    <td className="px-4 py-4 text-right text-muted-foreground">
+                      {brand.supporting_metrics.mention_coverage_display}
+                    </td>
+                    {engineNames.map((engine) => {
+                      const obs = brand.observations[engine];
+                      if (!obs) {
+                        return (
+                          <td key={engine} className="px-4 py-4 text-center text-muted-foreground">
+                            -
+                          </td>
+                        );
+                      }
+                      if (obs.status === "failed") {
+                        return (
+                          <td key={engine} className="px-4 py-4 text-center">
+                            <span className="text-xs px-2 py-0.5 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400">
+                              Failed
+                            </span>
+                          </td>
+                        );
+                      }
+                      if (!obs.mentioned || obs.best_rank === null || obs.best_rank === undefined) {
+                        return (
+                          <td key={engine} className="px-4 py-4 text-center text-muted-foreground">
+                            -
+                          </td>
+                        );
+                      }
+                      return (
+                        <td key={engine} className="px-4 py-4 text-center">
+                          <span className="inline-block px-2.5 py-0.5 rounded-full font-semibold text-xs bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                            #{obs.best_rank}
+                          </span>
+                        </td>
+                      );
+                    })}
+                  </tr>
+
+                  <AnimatePresence>
+                    {isExpanded && (
+                      <motion.tr
+                        initial={{ opacity: 0, height: 0 }}
+                        animate={{ opacity: 1, height: "auto" }}
+                        exit={{ opacity: 0, height: 0 }}
+                        className="bg-muted/15"
+                      >
+                        <td colSpan={4 + engineNames.length} className="p-0">
+                          <div className="px-8 py-4 border-b">
+                            <div className="flex items-center gap-2 mb-3 text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                              <Package className="w-3.5 h-3.5 text-primary" />
+                              Product Evidence for {brand.name}
+                            </div>
+                            {brand.products.length === 0 ? (
+                              <p className="text-xs text-muted-foreground italic py-2">
+                                No specific product models were extracted for this brand mention.
+                              </p>
+                            ) : (
+                              <table className="w-full text-xs">
+                                <thead>
+                                  <tr className="text-muted-foreground border-b border-border/50 text-left">
+                                    <th className="py-2 font-medium">Model / Product Name</th>
+                                    <th className="py-2 font-medium">Observed Engine</th>
+                                    <th className="py-2 font-medium text-right">Engine Rank</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border/40">
+                                  {brand.products.map((prod, idx) => (
+                                    <tr key={`${prod.engine}-${prod.rank}-${idx}`}>
+                                      <td className="py-2 font-medium text-foreground">
+                                        {prod.product_name}
+                                      </td>
+                                      <td className="py-2 text-muted-foreground">
+                                        {prod.engine}
+                                      </td>
+                                      <td className="py-2 text-right font-semibold text-foreground">
+                                        #{prod.rank}
+                                      </td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            )}
+                          </div>
+                        </td>
+                      </motion.tr>
+                    )}
+                  </AnimatePresence>
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>

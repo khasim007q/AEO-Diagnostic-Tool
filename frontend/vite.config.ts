@@ -18,7 +18,6 @@ export default defineConfig({
           vendor_react: ["react", "react-dom"],
           vendor_ui: ["framer-motion", "lucide-react"],
           vendor_charts: ["recharts"],
-          vendor_query: ["@tanstack/react-query"],
         },
       },
     },

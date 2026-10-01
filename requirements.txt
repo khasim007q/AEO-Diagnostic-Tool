@@ -1,6 +1,0 @@
-streamlit
-requests
-google-search-results
-pandas
-python-dotenv
-thefuzz[speedup]

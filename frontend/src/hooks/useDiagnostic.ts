@@ -4,6 +4,6 @@ import { DiagnosticRequest, DiagnosticResponse } from '../lib/types';
 
 export function useDiagnostic() {
   return useMutation<DiagnosticResponse, Error, DiagnosticRequest>({
-    mutationFn: runDiagnostic,
+    mutationFn: (req: DiagnosticRequest) => runDiagnostic(req),
   });
 }

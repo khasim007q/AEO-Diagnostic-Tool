@@ -1,248 +1,309 @@
 # router.py
+import time
 import logging
-from fastapi import APIRouter, HTTPException
+import asyncio
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+from collections import defaultdict
+from fastapi import APIRouter, HTTPException, Request
 
 from app.api.schemas import (
     DiagnosticRequest,
     DiagnosticResponse,
-    BrandResult,
-    ProductResult,
-    GapEntry,
-    GoogleResult,
+    BrandResultSchema,
+    ProductEvidenceSchema,
+    EngineObservationSchema,
+    SupportingMetricsSchema,
+    EngineSummarySchema,
+    GoogleCorroborationSummarySchema,
+    GoogleCorroborationResultSchema,
+    GapEntrySchema,
+    TypedInsightSchema,
+    RequestMetadataSchema,
+    RawEvidenceSchema,
 )
-from app.services.llm_service import query_llms, MODELS
-from app.services.serp_service import search_google
-from app.services.parser_service import parse_llm_response
+from app.services.llm_service import query_llms_parallel, MODELS, EngineExecutionResult
+from app.services.serp_service import search_google_corroboration, GoogleCorroborationSummary
 from app.services.scoring_engine import (
-    merge_products,
-    calculate_grade,
-    generate_insights,
+    aggregate_brands,
+    calculate_gap_analysis,
+    generate_typed_insights,
+    get_visibility_label,
 )
-from app.utils.fuzzy import is_same_brand
+from app.models.brand import Brand
 
 logger = logging.getLogger(__name__)
 
 api_router = APIRouter()
 
+# Global semaphore to bound concurrent expensive diagnostic runs
+CONCURRENCY_SEMAPHORE = asyncio.Semaphore(5)
 
-@api_router.post("/diagnostic", response_model=DiagnosticResponse)
-async def run_diagnostic(request: DiagnosticRequest):
-    """Run a full AEO diagnostic for the given query.
+# In-memory sliding window rate limiter: IP -> list of request timestamps
+RATE_LIMIT_WINDOW_SECONDS = 60
+MAX_REQUESTS_PER_WINDOW = 15
+_ip_request_timestamps: Dict[str, List[float]] = defaultdict(list)
 
-    Orchestrates the entire pipeline:
-    1. Query all LLMs in parallel
-    2. Search Google via SerpApi
-    3. Parse and extract brands/products from LLM responses
-    4. Score, group, and cross-validate
-    5. Generate grade, insights, and gap analysis
 
-    Args:
-        request: DiagnosticRequest with query and optional brand name.
+def _check_rate_limit(client_ip: str) -> None:
+    """Enforce a simple in-memory sliding window rate limit per client IP."""
+    now = time.time()
+    timestamps = _ip_request_timestamps[client_ip]
 
-    Returns:
-        DiagnosticResponse with all results.
-    """
-    try:
-        # 1. Fetch data from LLMs and Google in parallel
-        llm_responses = await query_llms(request.query)
-        web_results = search_google(request.query)
+    # Purge timestamps outside window
+    cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+    valid_timestamps = [t for t in timestamps if t > cutoff]
+    _ip_request_timestamps[client_ip] = valid_timestamps
 
-        # 2. Parse LLM responses into brand/product structures
-        parsed_data = {}
-        for model_name, res in llm_responses.items():
-            if res.get("error"):
-                logger.warning("Error from %s: %s", model_name, res["error"])
-                continue
-            raw_text = res.get("raw_text", "")
-            parsed = parse_llm_response(raw_text)
-            if parsed:
-                parsed_data[model_name] = parsed
-                res["parsed_count"] = len(parsed)
-            else:
-                res["parsed_count"] = 0
-
-        # 3. Merge, score, and group by brand
-        brands = merge_products(parsed_data, web_results)
-
-        # 4. Map domain models to response schemas
-        all_brands = _brands_to_results(brands)
-
-        # 5. Separate user's brand from competitors
-        your_brand_result = None
-        competitors = []
-
-        if request.your_brand:
-            your_brand_lower = request.your_brand.strip().lower()
-            for brand_result in all_brands:
-                if is_same_brand(brand_result.name, your_brand_lower, threshold=70):
-                    if your_brand_result is None:
-                        your_brand_result = brand_result
-                    else:
-                        competitors.append(brand_result)
-                else:
-                    competitors.append(brand_result)
-        else:
-            competitors = list(all_brands)
-
-        # 6. Calculate grade
-        # Max possible: rank 1 (10pts) x 3 LLMs x 1.30 consensus + 2.0 web = 41.0
-        max_possible = (10.0 * 3 * 1.30) + 2.0
-        score = your_brand_result.total_score if your_brand_result else 0.0
-        grade = calculate_grade(score, max_possible)
-
-        # 7. Generate insights
-        insights = generate_insights(brands, request.your_brand)
-
-        # 8. Build gap analysis (per-LLM comparison with top competitors)
-        gap_analysis = _build_gap_analysis(
-            your_brand_result, competitors, brands
+    if len(valid_timestamps) >= MAX_REQUESTS_PER_WINDOW:
+        logger.warning("Rate limit exceeded for IP: %s", client_ip)
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please wait a minute before running another diagnostic.",
         )
 
-        # 9. Convert GoogleResult schemas for the response
-        google_result_schemas = [
-            GoogleResult(
+    _ip_request_timestamps[client_ip].append(now)
+
+
+@api_router.post("/diagnostic", response_model=DiagnosticResponse)
+async def run_diagnostic(request: DiagnosticRequest, req: Request):
+    """Run an AI Visibility Diagnostic with parallel model execution and search corroboration."""
+    # 1. API Protection: Rate limiting
+    client_ip = req.client.host if req.client else "unknown"
+    _check_rate_limit(client_ip)
+
+    # 2. Concurrency limiting
+    async with CONCURRENCY_SEMAPHORE:
+        try:
+            # 3. Concurrent execution: LLM queries and Google Search run in parallel
+            llm_task = asyncio.create_task(query_llms_parallel(request.query))
+            google_task = asyncio.create_task(
+                search_google_corroboration(
+                    query=request.query,
+                    target_brand=request.your_brand,
+                    website_or_domain=request.website_or_domain,
+                    market=request.market,
+                    location=request.location,
+                    language=request.language,
+                    google_domain=request.google_domain,
+                )
+            )
+
+            # Wait for both tasks concurrently with a hard timeout of 40s
+            llm_results, google_summary = await asyncio.wait_for(
+                asyncio.gather(llm_task, google_task),
+                timeout=40.0,
+            )
+
+        except asyncio.TimeoutError:
+            logger.error("Diagnostic execution timed out after 40 seconds")
+            raise HTTPException(
+                status_code=504,
+                detail="Diagnostic timed out while waiting for evaluation models or search results.",
+            )
+        except Exception as exc:
+            logger.error("Diagnostic execution failed: %s", exc, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"An error occurred during diagnostic execution: {str(exc)}",
+            )
+
+    # 4. Deterministic Brand Aggregation & Scoring
+    all_brands, target_brand, competitors = aggregate_brands(
+        engine_results=llm_results,
+        target_brand_name=request.your_brand,
+        target_domain=request.website_or_domain,
+    )
+
+    # 5. Determine Primary AI Visibility Score & Label
+    # If target brand was provided, the primary score is the target brand's score.
+    # Otherwise, it reflects the category leader's score.
+    if target_brand:
+        primary_score = target_brand.ai_visibility_score
+        primary_label = get_visibility_label(primary_score, target_brand.mentioned_engine_count > 0)
+        primary_metrics = _map_supporting_metrics(target_brand)
+    elif all_brands:
+        leader = all_brands[0]
+        primary_score = leader.ai_visibility_score
+        primary_label = get_visibility_label(primary_score, leader.mentioned_engine_count > 0)
+        primary_metrics = _map_supporting_metrics(leader)
+    else:
+        primary_score = 0.0
+        primary_label = "Not visible"
+        primary_metrics = SupportingMetricsSchema(
+            engine_availability=0.0,
+            engine_availability_display="0/0 engines",
+            mention_coverage=0.0,
+            mention_coverage_display="0/0 (0%)",
+            median_rank=None,
+            average_rank=None,
+            best_rank=None,
+            worst_rank=None,
+            successful_engine_count=0,
+            configured_engine_count=len(llm_results),
+            mentioned_engine_count=0,
+        )
+
+    # 6. Gap Analysis
+    engine_names = [m["name"] for m in MODELS]
+    gaps = calculate_gap_analysis(target_brand, competitors, engine_names)
+
+    # 7. Typed, Evidence-Only Insights
+    insights = generate_typed_insights(
+        target_brand=target_brand,
+        all_brands=all_brands,
+        engine_results=llm_results,
+        google_summary=google_summary,
+    )
+
+    # 8. Assemble Engine Summaries & Raw Evidence
+    engine_summaries: List[EngineSummarySchema] = []
+    raw_evidence_dict: Dict[str, RawEvidenceSchema] = {}
+
+    for eng_name, res in llm_results.items():
+        recs_count = len(res.parse_result.recommendations) if res.parse_result else 0
+        engine_summaries.append(
+            EngineSummarySchema(
+                engine=eng_name,
+                status=res.status,
+                latency_ms=res.latency_ms,
+                attempts=res.attempts,
+                recommendations_count=recs_count,
+                error_type=res.error_type,
+                error_message=res.error_message,
+            )
+        )
+        raw_evidence_dict[eng_name] = RawEvidenceSchema(
+            engine=eng_name,
+            status=res.status,
+            raw_content=res.raw_text,
+            parsed_count=recs_count,
+            latency_ms=res.latency_ms,
+            attempts=res.attempts,
+            error=res.error_message,
+        )
+
+    # 9. Format Google Corroboration Summary
+    google_corroboration_schema = GoogleCorroborationSummarySchema(
+        status=google_summary.status,
+        error_message=google_summary.error_message,
+        total_results=google_summary.total_results,
+        brand_found=google_summary.brand_found,
+        best_google_rank=google_summary.best_google_rank,
+        results=[
+            GoogleCorroborationResultSchema(
                 rank=r.rank,
                 title=r.title,
                 snippet=r.snippet,
                 url=r.url,
+                domain=r.domain,
+                title_match=r.title_match,
+                snippet_match=r.snippet_match,
+                domain_match=r.domain_match,
+                normalized_brand_match=r.normalized_brand_match,
+                match_type=r.match_type,
+                confidence=r.confidence,
             )
-            for r in web_results[:10]
-        ]
+            for r in google_summary.results
+        ],
+    )
 
-        llm_names = [m["name"] for m in MODELS]
+    # 10. Map Brands to Output Schemas
+    all_brand_schemas = [_map_brand_to_schema(b) for b in all_brands]
+    target_brand_schema = _map_brand_to_schema(target_brand) if target_brand else None
+    competitor_schemas = [_map_brand_to_schema(b) for b in competitors[:10]]
 
-        return DiagnosticResponse(
-            grade=grade,
-            your_brand=your_brand_result,
-            all_brands=all_brands,
-            competitors=competitors[:10],
-            gap_analysis=gap_analysis,
-            insights=insights,
-            google_results=google_result_schemas,
-            raw_llm_responses={
-                name: {
-                    "raw": res.get("raw_text", ""),
-                    "parsed_count": res.get("parsed_count", 0),
-                }
-                for name, res in llm_responses.items()
-            },
-            llm_names=llm_names,
+    # 11. Metadata
+    metadata = RequestMetadataSchema(
+        query=request.query,
+        target_brand=request.your_brand,
+        website_or_domain=request.website_or_domain,
+        market=request.market or "US",
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+
+    return DiagnosticResponse(
+        metadata=metadata,
+        ai_visibility_score=primary_score,
+        visibility_label=primary_label,
+        supporting_metrics=primary_metrics,
+        target_brand=target_brand_schema,
+        all_brands=all_brand_schemas,
+        competitors=competitor_schemas,
+        engine_summaries=engine_summaries,
+        gap_analysis=[GapEntrySchema(**g) for g in gaps],
+        google_corroboration=google_corroboration_schema,
+        insights=[TypedInsightSchema(**i) for i in insights],
+        raw_evidence=raw_evidence_dict,
+    )
+
+
+def _map_supporting_metrics(brand: Brand) -> SupportingMetricsSchema:
+    """Build SupportingMetricsSchema for a Brand."""
+    succ = brand.successful_engine_count
+    conf = brand.configured_engine_count
+    ment = brand.mentioned_engine_count
+
+    avail_display = f"{succ}/{conf} engines"
+    cov_display = f"{ment}/{succ} ({brand.mention_coverage}%)" if succ > 0 else "0/0 (0%)"
+
+    return SupportingMetricsSchema(
+        engine_availability=brand.engine_availability,
+        engine_availability_display=avail_display,
+        mention_coverage=brand.mention_coverage,
+        mention_coverage_display=cov_display,
+        median_rank=brand.median_rank,
+        average_rank=brand.average_rank,
+        best_rank=brand.best_rank,
+        worst_rank=brand.worst_rank,
+        successful_engine_count=succ,
+        configured_engine_count=conf,
+        mentioned_engine_count=ment,
+    )
+
+
+def _map_brand_to_schema(brand: Brand) -> BrandResultSchema:
+    """Map internal Brand domain model to BrandResultSchema."""
+    products_schema = [
+        ProductEvidenceSchema(
+            brand_name=p.brand_name,
+            product_name=p.product_name,
+            full_name=p.full_name,
+            rank=p.rank,
+            engine=p.engine,
         )
+        for p in brand.products
+    ]
 
-    except ValueError as e:
-        logger.error("Validation error: %s", str(e))
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("Diagnostic error: %s", str(e), exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="An internal error occurred while running the diagnostic.",
-        )
-
-
-def _brands_to_results(brands: list) -> list[BrandResult]:
-    """Convert domain Brand objects to BrandResult schemas.
-
-    Args:
-        brands: List of Brand domain objects.
-
-    Returns:
-        List of BrandResult Pydantic models.
-    """
-    results = []
-    for b in brands:
-        products = [
-            ProductResult(
-                brand_name=p.brand_name,
-                product_name=p.product_name,
-                full_name=p.full_name,
-                ranks=p.ranks,
-                score=p.score,
-                web_validated=p.web_validated,
-                web_rank=p.web_rank,
-            )
-            for p in b.products
-        ]
-        results.append(
-            BrandResult(
-                name=b.name,
-                products=products,
-                total_score=b.total_score,
-                llm_coverage=list(b.llm_coverage),
-                consensus_pct=round(b.consensus_pct, 1),
-            )
-        )
-    return results
-
-
-def _build_gap_analysis(
-    your_brand: BrandResult | None,
-    competitors: list[BrandResult],
-    brands: list,
-) -> list[GapEntry]:
-    """Build per-LLM gap analysis between user's brand and competitors.
-
-    Args:
-        your_brand: The user's brand result (may be None).
-        competitors: List of competitor brand results.
-        brands: Raw Brand domain objects (for LLM coverage lookup).
-
-    Returns:
-        List of GapEntry objects.
-    """
-    if not your_brand or not competitors:
-        return []
-
-    gap_entries = []
-
-    # Get all LLM names from the brands data
-    all_llms: set[str] = set()
-    for b in brands:
-        all_llms.update(b.llm_coverage)
-
-    for comp in competitors[:5]:
-        for llm in sorted(all_llms):
-            # Find scores for this LLM from products
-            your_llm_score = _get_llm_score(your_brand, llm)
-            comp_llm_score = _get_llm_score(comp, llm)
-            diff = your_llm_score - comp_llm_score
-
-            if diff > 0:
-                status = "winning"
-            elif diff < 0:
-                status = "losing"
-            else:
-                status = "tied"
-
-            gap_entries.append(
-                GapEntry(
-                    competitor=comp.name,
-                    llm=llm,
-                    your_score=your_llm_score,
-                    their_score=comp_llm_score,
-                    gap=round(abs(diff), 2),
-                    status=status,
+    observations_schema = {
+        eng: EngineObservationSchema(
+            engine=obs.engine,
+            status=obs.status,
+            mentioned=obs.mentioned,
+            best_rank=obs.best_rank,
+            position_score=obs.position_score,
+            products=[
+                ProductEvidenceSchema(
+                    brand_name=p.brand_name,
+                    product_name=p.product_name,
+                    full_name=p.full_name,
+                    rank=p.rank,
+                    engine=p.engine,
                 )
-            )
+                for p in obs.products
+            ],
+            latency_ms=obs.latency_ms,
+            error_type=obs.error_type,
+        )
+        for eng, obs in brand.observations.items()
+    }
 
-    return gap_entries
-
-
-def _get_llm_score(brand: BrandResult, llm_name: str) -> float:
-    """Get a brand's total score contribution from a specific LLM.
-
-    Args:
-        brand: BrandResult to inspect.
-        llm_name: Name of the LLM.
-
-    Returns:
-        Sum of scores from products that have ranks for this LLM.
-    """
-    total = 0.0
-    for product in brand.products:
-        if llm_name in product.ranks:
-            # The product's score already includes consensus multiplier,
-            # so we use the raw rank weight for per-LLM comparison
-            from app.services.scoring_engine import get_rank_weight
-            total += get_rank_weight(product.ranks[llm_name])
-    return total
+    return BrandResultSchema(
+        name=brand.name,
+        normalized_name=brand.normalized_name,
+        ai_visibility_score=brand.ai_visibility_score,
+        visibility_label=get_visibility_label(brand.ai_visibility_score, brand.mentioned_engine_count > 0),
+        metrics=_map_supporting_metrics(brand),
+        engine_observations=observations_schema,
+        products=products_schema,
+    )

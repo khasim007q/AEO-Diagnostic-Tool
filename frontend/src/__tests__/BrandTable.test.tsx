@@ -1,72 +1,150 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import BrandTable from "../components/BrandTable";
-import { BrandResult } from "../lib/types";
+import { BrandResult, EngineSummary } from "../lib/types";
 
 describe("BrandTable Component", () => {
-  const mockBrands: BrandResult[] = [
+  const mockEngineSummaries: EngineSummary[] = [
     {
-      name: "Optimum Nutrition",
-      total_score: 39.0,
-      consensus_pct: 100,
-      llm_coverage: ["GPT-5-mini", "Claude Sonnet", "Gemini 2.5 Flash"],
-      products: [
-        {
-          brand_name: "Optimum Nutrition",
-          product_name: "Gold Standard 100% Whey",
-          full_name: "Optimum Nutrition Gold Standard 100% Whey",
-          ranks: { "GPT-5-mini": 1, "Claude Sonnet": 1, "Gemini 2.5 Flash": 1 },
-          score: 39.0,
-          web_validated: true,
-          web_rank: 1,
-        },
-      ],
+      engine: "GPT-5-mini",
+      status: "success",
+      latency_ms: 500,
+      attempts: 1,
+      recommendations_count: 5,
     },
     {
-      name: "Dymatize",
-      total_score: 23.4,
-      consensus_pct: 66.7,
-      llm_coverage: ["GPT-5-mini", "Gemini 2.5 Flash"],
+      engine: "Claude Sonnet 4",
+      status: "success",
+      latency_ms: 600,
+      attempts: 1,
+      recommendations_count: 5,
+    },
+  ];
+
+  const mockBrands: BrandResult[] = [
+    {
+      name: "Nike",
+      normalized_name: "nike",
+      ai_visibility_score: 90.0,
+      visibility_label: "High visibility",
+      supporting_metrics: {
+        engine_availability: 100.0,
+        engine_availability_display: "2/2 engines",
+        mention_coverage: 100.0,
+        mention_coverage_display: "2/2 (100%)",
+        median_rank: 1.5,
+        average_rank: 1.5,
+        best_rank: 1,
+        worst_rank: 2,
+        successful_engine_count: 2,
+        configured_engine_count: 2,
+        mentioned_engine_count: 2,
+      },
+      observations: {
+        "GPT-5-mini": {
+          engine: "GPT-5-mini",
+          status: "success",
+          mentioned: true,
+          best_rank: 1,
+          position_score: 1.0,
+          products: [
+            {
+              brand_name: "Nike",
+              product_name: "Nike Pegasus 40",
+              full_name: "Nike Pegasus 40",
+              rank: 1,
+              engine: "GPT-5-mini",
+            },
+            {
+              brand_name: "Nike",
+              product_name: "Nike Vaporfly 3",
+              full_name: "Nike Vaporfly 3",
+              rank: 4,
+              engine: "GPT-5-mini",
+            },
+          ],
+          latency_ms: 500,
+        },
+        "Claude Sonnet 4": {
+          engine: "Claude Sonnet 4",
+          status: "success",
+          mentioned: true,
+          best_rank: 2,
+          position_score: 0.8,
+          products: [
+            {
+              brand_name: "Nike",
+              product_name: "Nike Pegasus 40",
+              full_name: "Nike Pegasus 40",
+              rank: 2,
+              engine: "Claude Sonnet 4",
+            },
+          ],
+          latency_ms: 600,
+        },
+      },
       products: [
         {
-          brand_name: "Dymatize",
-          product_name: "ISO100 Hydrolyzed",
-          full_name: "Dymatize ISO100 Hydrolyzed",
-          ranks: { "GPT-5-mini": 2, "Gemini 2.5 Flash": 2 },
-          score: 23.4,
-          web_validated: false,
-          web_rank: null,
+          brand_name: "Nike",
+          product_name: "Nike Pegasus 40",
+          full_name: "Nike Pegasus 40",
+          rank: 1,
+          engine: "GPT-5-mini",
+        },
+        {
+          brand_name: "Nike",
+          product_name: "Nike Vaporfly 3",
+          full_name: "Nike Vaporfly 3",
+          rank: 4,
+          engine: "GPT-5-mini",
         },
       ],
     },
   ];
 
-  it("renders brands table with correct score and consensus", () => {
-    render(<BrandTable brands={mockBrands} yourBrand={null} />);
+  it("renders brand table with dynamic engine columns and score", () => {
+    render(
+      <BrandTable
+        brands={mockBrands}
+        engineSummaries={mockEngineSummaries}
+      />
+    );
 
-    expect(screen.getByText("Optimum Nutrition")).toBeInTheDocument();
-    expect(screen.getByText("Dymatize")).toBeInTheDocument();
-    expect(screen.getByText("39")).toBeInTheDocument();
-    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("Nike")).toBeInTheDocument();
+    expect(screen.getByText("90.0 / 100")).toBeInTheDocument();
+    expect(screen.getByText("2/2 (100%)")).toBeInTheDocument();
+    expect(screen.getByText("GPT-5-mini")).toBeInTheDocument();
+    expect(screen.getByText("Claude Sonnet 4")).toBeInTheDocument();
+    expect(screen.getByText("#1")).toBeInTheDocument();
+    expect(screen.getByText("#2")).toBeInTheDocument();
   });
 
-  it("highlights user brand with a special badge", () => {
-    render(<BrandTable brands={mockBrands} yourBrand={mockBrands[0]} />);
+  it("highlights target brand with Target badge", () => {
+    render(
+      <BrandTable
+        brands={mockBrands}
+        targetBrand={mockBrands[0]}
+        engineSummaries={mockEngineSummaries}
+      />
+    );
 
-    expect(screen.getByText("Your Brand")).toBeInTheDocument();
+    expect(screen.getByText("Target")).toBeInTheDocument();
   });
 
-  it("expands product details when brand row is clicked", () => {
-    render(<BrandTable brands={mockBrands} yourBrand={null} />);
+  it("expands product evidence when clicking brand row", () => {
+    render(
+      <BrandTable
+        brands={mockBrands}
+        engineSummaries={mockEngineSummaries}
+      />
+    );
 
-    // Initially products are not expanded
-    expect(screen.queryByText("Gold Standard 100% Whey")).not.toBeInTheDocument();
+    expect(screen.queryByText("Product Evidence for Nike")).not.toBeInTheDocument();
 
-    // Click brand row to expand
-    fireEvent.click(screen.getByText("Optimum Nutrition"));
+    fireEvent.click(screen.getByText("Nike"));
 
-    // Now product is visible
-    expect(screen.getByText("Gold Standard 100% Whey")).toBeInTheDocument();
-    expect(screen.getAllByText("#1").length).toBeGreaterThan(0);
+    expect(screen.getByText("Product Evidence for Nike")).toBeInTheDocument();
+    expect(screen.getByText("Nike Vaporfly 3")).toBeInTheDocument();
+    expect(screen.getByText("#4")).toBeInTheDocument();
   });
 });

@@ -1,152 +1,120 @@
 # conftest.py
 import pytest
-from typing import Dict, Any, List
+from typing import Dict, Any
+from app.services.llm_service import EngineExecutionResult
+from app.services.parser_service import ParseResult, ParsedRecommendation
+from app.services.serp_service import GoogleCorroborationSummary, GoogleCorroborationResult
 
 
 @pytest.fixture
-def valid_json_response() -> str:
-    """Standard valid JSON response with brand and product fields."""
-    return (
-        '[{"rank": 1, "brand": "Optimum Nutrition", "product": "Optimum Nutrition Gold Standard 100% Whey"}, '
-        '{"rank": 2, "brand": "Dymatize", "product": "Dymatize ISO100 Hydrolyzed"}, '
-        '{"rank": 3, "brand": "MyProtein", "product": "MyProtein Impact Whey Protein"}, '
-        '{"rank": 4, "brand": "BSN", "product": "BSN SYNTHA-6 Edge"}, '
-        '{"rank": 5, "brand": "MuscleTech", "product": "MuscleTech Nitro-Tech 100% Whey Gold"}]'
-    )
+def perfect_five_recommendations():
+    """Valid 5-item recommendations structure."""
+    return [
+        ParsedRecommendation(rank=1, brand="Nike", product="Nike Air Zoom Pegasus 40"),
+        ParsedRecommendation(rank=2, brand="Adidas", product="Adidas Ultraboost Light"),
+        ParsedRecommendation(rank=3, brand="Brooks", product="Brooks Ghost 15"),
+        ParsedRecommendation(rank=4, brand="Asics", product="Asics Gel-Nimbus 25"),
+        ParsedRecommendation(rank=5, brand="Hoka", product="Hoka Clifton 9"),
+    ]
 
 
 @pytest.fixture
-def old_format_json_response() -> str:
-    """JSON response in old format (brand only, no product field)."""
-    return (
-        '[{"rank": 1, "brand": "Optimum Nutrition Gold Standard 100% Whey"}, '
-        '{"rank": 2, "brand": "Dymatize ISO100 Hydrolyzed"}, '
-        '{"rank": 3, "brand": "MyProtein Impact Whey Protein"}]'
-    )
+def multi_product_same_brand_recommendations():
+    """Engine returns multiple products for the same brand (Nike Pegasus #1 and Nike Vaporfly #4)."""
+    return [
+        ParsedRecommendation(rank=1, brand="Nike", product="Nike Air Zoom Pegasus 40"),
+        ParsedRecommendation(rank=2, brand="Adidas", product="Adidas Ultraboost Light"),
+        ParsedRecommendation(rank=3, brand="Brooks", product="Brooks Ghost 15"),
+        ParsedRecommendation(rank=4, brand="Nike", product="Nike Vaporfly 3"),
+        ParsedRecommendation(rank=5, brand="Hoka", product="Hoka Clifton 9"),
+    ]
 
 
 @pytest.fixture
-def fenced_json_response(valid_json_response: str) -> str:
-    """JSON response wrapped in markdown code fences."""
-    return f"```json\n{valid_json_response}\n```"
+def mock_successful_engine_results(perfect_five_recommendations) -> Dict[str, EngineExecutionResult]:
+    """3 successful engines with slight variations in ranking."""
+    gpt_recs = [
+        ParsedRecommendation(rank=1, brand="Nike", product="Nike Pegasus 40"),
+        ParsedRecommendation(rank=2, brand="Adidas", product="Adidas Ultraboost"),
+        ParsedRecommendation(rank=3, brand="Brooks", product="Brooks Ghost 15"),
+        ParsedRecommendation(rank=4, brand="Asics", product="Asics Nimbus"),
+        ParsedRecommendation(rank=5, brand="Hoka", product="Hoka Clifton"),
+    ]
+    claude_recs = [
+        ParsedRecommendation(rank=1, brand="Brooks", product="Brooks Ghost 15"),
+        ParsedRecommendation(rank=2, brand="Nike", product="Nike Pegasus 40"),
+        ParsedRecommendation(rank=3, brand="Saucony", product="Saucony Ride"),
+        ParsedRecommendation(rank=4, brand="New Balance", product="New Balance 1080"),
+        ParsedRecommendation(rank=5, brand="Asics", product="Asics Nimbus"),
+    ]
+    gemini_recs = [
+        ParsedRecommendation(rank=1, brand="Adidas", product="Adidas Ultraboost"),
+        ParsedRecommendation(rank=2, brand="Nike", product="Nike Pegasus 40"),
+        ParsedRecommendation(rank=3, brand="Hoka", product="Hoka Clifton"),
+        ParsedRecommendation(rank=4, brand="Puma", product="Puma Deviate"),
+        ParsedRecommendation(rank=5, brand="Mizuno", product="Mizuno Wave Rider"),
+    ]
 
-
-@pytest.fixture
-def truncated_json_response() -> str:
-    """JSON response truncated mid-object (common with Gemini)."""
-    return '[{"rank": 1, "brand": "OnePlus", "product": "OnePlus 12R"},'
-
-
-@pytest.fixture
-def truncated_mid_object_response() -> str:
-    """JSON truncated inside an object."""
-    return (
-        '[{"rank": 1, "brand": "Xiaomi", "product": "Xiaomi 14"}, '
-        '{"rank": 2, "brand": "Samsung", "product": "Samsung Galaxy S24"}, '
-        '{"rank": 3, "brand":'
-    )
-
-
-@pytest.fixture
-def prose_with_json() -> str:
-    """JSON array buried inside prose text."""
-    return (
-        'Here are my top picks for you:\n\n'
-        '[{"rank": 1, "brand": "Apple", "product": "iPhone 15 Pro"}, '
-        '{"rank": 2, "brand": "Samsung", "product": "Samsung Galaxy S24 Ultra"}]\n\n'
-        'Hope this helps!'
-    )
-
-
-@pytest.fixture
-def numbered_list_response() -> str:
-    """Plain text numbered list (no JSON)."""
-    return (
-        "Here are the top 5 whey proteins:\n"
-        "1. Optimum Nutrition Gold Standard 100% Whey - Best overall\n"
-        "2. BSN SYNTHA-6 Edge - Best for taste\n"
-        "3. MyProtein Impact Whey Protein - Best value\n"
-        "4. Dymatize ISO100 Hydrolyzed - Best for digestion\n"
-        "5. MuscleTech Nitro-Tech 100% Whey Gold - Best for muscle"
-    )
-
-
-@pytest.fixture
-def bold_markdown_response() -> str:
-    """Response with bold markdown brand names."""
-    return (
-        "I recommend these supplements:\n\n"
-        "**Optimum Nutrition Gold Standard** is great for beginners.\n"
-        "**BSN SYNTHA-6 Edge** offers amazing taste.\n"
-        "**MyProtein Impact Whey** provides the best value."
-    )
-
-
-@pytest.fixture
-def special_chars_json() -> str:
-    """JSON with special characters in brand names."""
-    return (
-        '[{"rank": 1, "brand": "Nature Made", "product": "Nature Made Wellblends Calm & Relax"}, '
-        '{"rank": 2, "brand": "Optimum Nutrition", "product": "Optimum Nutrition Gold Standard 100% Whey"}, '
-        '{"rank": 3, "brand": "GNC", "product": "GNC Pro Performance 100% Whey + Creatine"}]'
-    )
-
-
-@pytest.fixture
-def sample_parsed_data() -> Dict[str, List[Dict[str, Any]]]:
-    """Parsed LLM data from 3 models, with overlapping brands."""
     return {
-        "GPT-5-mini": [
-            {"brand": "Optimum Nutrition", "product": "Gold Standard 100% Whey", "rank": 1},
-            {"brand": "Dymatize", "product": "ISO100 Hydrolyzed", "rank": 2},
-            {"brand": "MyProtein", "product": "Impact Whey Protein", "rank": 3},
-            {"brand": "BSN", "product": "SYNTHA-6 Edge", "rank": 4},
-            {"brand": "MuscleTech", "product": "Nitro-Tech", "rank": 5},
-        ],
-        "Claude Sonnet": [
-            {"brand": "Optimum Nutrition", "product": "Gold Standard 100% Whey", "rank": 1},
-            {"brand": "MyProtein", "product": "Impact Whey Protein", "rank": 2},
-            {"brand": "Dymatize", "product": "ISO100 Hydrolyzed", "rank": 3},
-            {"brand": "MuscleTech", "product": "Nitro-Tech", "rank": 4},
-            {"brand": "Garden of Life", "product": "Sport Organic Protein", "rank": 5},
-        ],
-        "Gemini 2.5 Flash": [
-            {"brand": "Optimum Nutrition", "product": "Gold Standard 100% Whey", "rank": 1},
-            {"brand": "Dymatize", "product": "ISO100 Hydrolyzed", "rank": 2},
-            {"brand": "BSN", "product": "SYNTHA-6 Edge", "rank": 3},
-            {"brand": "Nature Made", "product": "Wellblends Calm & Relax", "rank": 4},
-            {"brand": "MuscleTech", "product": "Nitro-Tech", "rank": 5},
-        ],
+        "GPT-5-mini": EngineExecutionResult(
+            engine="GPT-5-mini",
+            status="success",
+            latency_ms=120.0,
+            attempts=1,
+            parse_result=ParseResult(status="valid", recommendations=gpt_recs),
+        ),
+        "Claude Sonnet 4": EngineExecutionResult(
+            engine="Claude Sonnet 4",
+            status="success",
+            latency_ms=210.0,
+            attempts=1,
+            parse_result=ParseResult(status="valid", recommendations=claude_recs),
+        ),
+        "Gemini 2.5 Flash": EngineExecutionResult(
+            engine="Gemini 2.5 Flash",
+            status="success",
+            latency_ms=180.0,
+            attempts=1,
+            parse_result=ParseResult(status="valid", recommendations=gemini_recs),
+        ),
     }
 
 
 @pytest.fixture
-def sample_google_results():
-    """Sample Google search results for cross-validation."""
-    from app.api.schemas import GoogleResult
-    return [
-        GoogleResult(
+def mock_google_summary_success() -> GoogleCorroborationSummary:
+    """Successful Google search corroboration with target brand present."""
+    results = [
+        GoogleCorroborationResult(
             rank=1,
-            title="Best Whey Protein Powders 2024 - Optimum Nutrition Review",
-            snippet="Optimum Nutrition Gold Standard is our top pick for whey protein.",
-            url="https://example.com/best-whey-protein",
+            title="Official Nike Running Shoes & Gear",
+            snippet="Shop the latest running shoes from Nike with free shipping.",
+            url="https://www.nike.com/running",
+            domain="nike.com",
+            title_match=True,
+            snippet_match=True,
+            domain_match=True,
+            normalized_brand_match=True,
+            match_type="domain",
+            confidence=1.0,
         ),
-        GoogleResult(
+        GoogleCorroborationResult(
             rank=2,
-            title="Dymatize ISO100 vs Optimum Nutrition",
-            snippet="Compare the top two whey protein powders available.",
-            url="https://example.com/dymatize-vs-on",
-        ),
-        GoogleResult(
-            rank=5,
-            title="MyProtein Impact Whey - Full Review",
-            snippet="MyProtein offers great value for money.",
-            url="https://example.com/myprotein-review",
-        ),
-        GoogleResult(
-            rank=8,
-            title="Best Supplements for Muscle Building",
-            snippet="BSN SYNTHA-6 Edge and MuscleTech Nitro-Tech are popular choices.",
-            url="https://example.com/muscle-supplements",
+            title="Best Running Shoes of 2024 - Runner's World",
+            snippet="We tested the top running shoes from Nike, Adidas, and Brooks.",
+            url="https://runnersworld.com/shoes",
+            domain="runnersworld.com",
+            title_match=False,
+            snippet_match=True,
+            domain_match=False,
+            normalized_brand_match=True,
+            match_type="snippet",
+            confidence=0.60,
         ),
     ]
+    return GoogleCorroborationSummary(
+        status="success",
+        total_results=2,
+        brand_found=True,
+        best_google_rank=1,
+        results=results,
+    )
